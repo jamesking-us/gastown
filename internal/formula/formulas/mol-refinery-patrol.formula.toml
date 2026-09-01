@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 16
+version = 17
 
 [vars]
 [vars.wisp_type]
@@ -187,11 +187,47 @@ default = "gt"
 id = "inbox-check"
 title = "Check refinery mail"
 description = """
-First, clean up wisps from previous cycles (closed wisps + abandoned wisps):
+First, clean up CLOSED wisps from previous cycles:
 ```bash
-bd mol wisp gc --closed --force
-bd mol wisp gc --age 1h --force
+# REMOVED — see the PROHIBITED block below. Run nothing here.
 ```
+
+> 🚨 **PROHIBITED — DO NOT RUN `bd mol wisp gc --closed --force`.**
+> Town-wide standing order, mayor-ratified 2026-09-01 (hq-hazr). In force until
+> hq-hazr is fixed. Applies to EVERY patrol formula and EVERY seat.
+>
+> **The command is UNSCOPED.** It deletes closed wisps across the WHOLE database,
+> not just your own. Three confirmed harms:
+>   1. Deletes the ACTIVE patrol molecule's own closed steps -> the step ledger is
+>      destroyed mid-cycle and the cycle under-reports its work (measured: a 27/27
+>      ledger went to 0/1 after one call).
+>   2. Deletes completed DOG molecules, which the hq-z70b `gt dog clear --force`
+>      guard depends on -> guard half (a) becomes unsatisfiable and fails PERMISSIVE.
+>   3. **Deletes rig MERGE-REQUEST beads (`<rig>-wisp-*`), permanently orphaning
+>      cleanup wisps.** A merged MR bead is a CLOSED wisp. Once deleted, a completion
+>      routes ONCE against a missing MR, is read as "still pending", and mints a
+>      cleanup wisp waiting on a MERGED signal that ALREADY FIRED. ~22 such orphans
+>      accumulated over one shift on cloudcontentmanager. Harm 3 is reachable from
+>      RIG seats, which is why witness and refinery patrols are in scope, not just
+>      the deacon's.
+>
+> **THE `hq-dzz` WARNING BELOW IS THE WRONG WARNING.** hq-dzz is real (P2, closed)
+> and its age-based finding is correct, but its recommendation to "use closed-only
+> cleanup here" as the SAFE alternative is FALSE and is what steered three formulas
+> into the destructive command. Do not follow it.
+>
+> **What to do instead:** run NOTHING here. Record `patrol-cleanup:SKIP` (or the
+> equivalent step id) explicitly in your cycle report every cycle — never omit it
+> silently — and report one closed-wisp count using `bd mol wisp list --all`.
+> NOTE: the DEFAULT `bd mol wisp list` is BLIND to closed wisps and returns a
+> fabricated zero. Stale-wisp cleanup belongs outside active patrol molecules.
+
+
+> **Warning (hq-dzz):** Do not run unscoped age-based wisp GC (`--age 1h`) from
+> inside this patrol. Active patrol step wisps can be older than 1h before they
+> run; age cleanup can reap this molecule's own open steps and delete the active
+> patrol molecule mid-cycle (this happened to the Deacon patrol). Use closed-only
+> cleanup here; stale open-wisp cleanup belongs outside active patrol molecules.
 
 Then check mail for MERGE_READY submissions, escalations, and messages.
 

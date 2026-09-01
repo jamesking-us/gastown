@@ -122,14 +122,77 @@ func TestPatrolFormulasHaveReportCycle(t *testing.T) {
 	}
 }
 
-// TestPatrolFormulasHaveWispGC verifies that all three patrol formulas
-// include `bd mol wisp gc` in their inbox-check step for safe cleanup.
+// bannedWispGCInvocation reports the first line of a formula's raw source that
+// actually INVOKES `bd mol wisp gc` (a bare command line inside a ```bash
+// fence), as opposed to merely naming the command in the backtick-quoted
+// PROHIBITED prose, where every line begins with a `>` quote marker.
 //
-// Closed-wisp cleanup is safe inside active patrols. Stale open-wisp cleanup
-// belongs to reaper paths that are not running inside the active patrol molecule.
+// It scans raw source rather than parsed steps so that it covers every formula,
+// including aspect formulas that Parse rejects on their own. Descriptions are
+// written both as TOML multi-line strings and as single-line strings with
+// escaped newlines, so literal `\n` sequences are unescaped before scanning.
+func bannedWispGCInvocation(content []byte) (string, bool) {
+	unescaped := strings.ReplaceAll(string(content), `\n`, "\n")
+	for _, line := range strings.Split(unescaped, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "bd mol wisp gc") {
+			return trimmed, true
+		}
+	}
+	return "", false
+}
+
+// TestFormulasDoNotInvokeBannedWispGC verifies that NO embedded formula invokes
+// `bd mol wisp gc` in any variant.
 //
-// Regression test for steveyegge/gastown#1712.
-func TestPatrolFormulasHaveWispGC(t *testing.T) {
+// `bd mol wisp gc --closed --force` is UNSCOPED: it deletes closed wisps across
+// the whole database, not just the caller's. It destroys the active patrol
+// molecule's own step ledger, deletes completed dog molecules that the hq-z70b
+// `gt dog clear --force` guard depends on, and deletes rig merge-request beads,
+// permanently orphaning cleanup wisps. The age-based variant additionally reaps
+// the active patrol's own open steps (hq-dzz / hq-3pp).
+//
+// Running it is prohibited town-wide by mayor-ratified standing order
+// (hq-hazr, 2026-09-01), in force until hq-hazr ships its fix of record.
+//
+// This test replaces TestPatrolFormulasHaveWispGC, which asserted the OPPOSITE
+// and made the ban unappliable to the formula sources: patching the sources
+// turned CI red, and the obvious way to green it was to revert the ban.
+// See gt-9ab, gt-34h, hq-gk8d.
+func TestFormulasDoNotInvokeBannedWispGC(t *testing.T) {
+	entries, err := formulasFS.ReadDir("formulas")
+	if err != nil {
+		t.Fatalf("reading embedded formulas dir: %v", err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		t.Run(name, func(t *testing.T) {
+			content, err := formulasFS.ReadFile("formulas/" + name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+
+			if line, found := bannedWispGCInvocation(content); found {
+				t.Errorf("%s invokes banned wisp GC: %q\n"+
+					"Wisp GC of every variant is prohibited town-wide until hq-hazr\n"+
+					"ships its fix of record (mayor-ratified 2026-09-01, hq-hazr).\n"+
+					"Run nothing here; stale-wisp cleanup belongs outside active\n"+
+					"patrol molecules. See gt-9ab, gt-34h, hq-gk8d.",
+					name, line)
+			}
+		})
+	}
+}
+
+// TestPatrolFormulasCarryWispGCProhibition verifies that the three patrol
+// formulas do not merely omit the banned command but explain WHY, so that a
+// future editor restoring "cleanup" has the standing order in front of them.
+//
+// Regression test for gt-9ab / gt-34h: the ban previously existed only in the
+// deployed copies under .beads/formulas, so `gt doctor --fix` — which reports
+// the hand-patched copies as drift — would overwrite them with the armed
+// sources and re-arm the command town-wide while reporting a successful repair.
+func TestPatrolFormulasCarryWispGCProhibition(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
@@ -160,48 +223,14 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 				t.Fatalf("%s: inbox-check step not found or has empty description", name)
 			}
 
-			if !strings.Contains(inboxDesc, "bd mol wisp gc") {
-				t.Errorf("%s inbox-check step missing \"bd mol wisp gc\"\n"+
-					"All patrol formulas must run wisp GC at the start of each cycle\n"+
-					"to clean up stale wisps from abnormal exits.\n"+
-					"See steveyegge/gastown#1712.",
+			if !strings.Contains(inboxDesc, "PROHIBITED") || !strings.Contains(inboxDesc, "hq-hazr") {
+				t.Errorf("%s inbox-check step is missing the hq-hazr PROHIBITED block\n"+
+					"Each patrol formula must carry the standing order explaining why\n"+
+					"wisp GC is not run here, so it is not silently reinstated.\n"+
+					"See gt-9ab, gt-34h, hq-gk8d.",
 					name)
 			}
 		})
-	}
-}
-
-// TestDeaconPatrolDoesNotRunAgeBasedWispGC verifies that the Deacon patrol
-// does not reap open step wisps from its own active patrol molecule.
-//
-// Regression test for hq-3pp.
-func TestDeaconPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
-	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
-	if err != nil {
-		t.Fatalf("reading deacon patrol formula: %v", err)
-	}
-
-	f, err := Parse(content)
-	if err != nil {
-		t.Fatalf("parsing deacon patrol formula: %v", err)
-	}
-
-	var inboxDesc string
-	for _, step := range f.Steps {
-		if step.ID == "inbox-check" {
-			inboxDesc = step.Description
-			break
-		}
-	}
-	if inboxDesc == "" {
-		t.Fatal("deacon patrol formula: inbox-check step not found or has empty description")
-	}
-
-	if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force") {
-		t.Fatal("deacon inbox-check must keep closed-wisp cleanup")
-	}
-	if strings.Contains(inboxDesc, "bd mol wisp gc --age") {
-		t.Fatal("deacon inbox-check must not run age-based wisp GC inside the active patrol")
 	}
 }
 
