@@ -64,9 +64,11 @@ func TestRenderFormulaStepsFull_DeaconIncludesHeartbeatCommand(t *testing.T) {
 		t.Fatalf("renderFormulaStepsFull: %v", err)
 	}
 	for _, want := range []string{
-		"### Step 1: Refresh heartbeat",
+		// brief-in precedes the heartbeat by mayor order (gt-9yi).
+		"### Step 1: Brief in before anything else",
+		"### Step 2: Refresh heartbeat",
 		"gt deacon heartbeat \"starting patrol cycle\"",
-		"This MUST run before any other step.",
+		"This MUST run before any step other than `brief-in`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("rendered deacon patrol missing %q:\n%s", want, out)

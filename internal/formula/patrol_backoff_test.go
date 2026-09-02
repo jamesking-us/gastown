@@ -327,15 +327,35 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 		t.Fatalf("parsing deacon patrol formula: %v", err)
 	}
 
-	// The first step must be the heartbeat step (no dependencies)
+	// brief-in precedes the heartbeat by mayor order (gt-9yi): a fresh session
+	// must read the standing rulings before it runs anything, and the heartbeat
+	// is "anything". brief-in is three cheap reads, so the heartbeat still lands
+	// far inside the 20-minute HeartbeatVeryStaleThreshold window.
 	if len(f.Steps) == 0 {
 		t.Fatal("deacon patrol formula has no steps")
 	}
-	if f.Steps[0].ID != "heartbeat" {
-		t.Errorf("first step should be \"heartbeat\", got %q", f.Steps[0].ID)
+	if f.Steps[0].ID != "brief-in" {
+		t.Errorf("first step should be \"brief-in\", got %q", f.Steps[0].ID)
 	}
-	if !strings.Contains(f.Steps[0].Description, "gt deacon heartbeat") {
-		t.Error("heartbeat step must contain \"gt deacon heartbeat\" command")
+	if len(f.Steps) < 2 || f.Steps[1].ID != "heartbeat" {
+		got := ""
+		if len(f.Steps) > 1 {
+			got = f.Steps[1].ID
+		}
+		t.Errorf("second step should be \"heartbeat\", got %q", got)
+	}
+
+	// heartbeat must run early and must depend only on brief-in
+	for _, step := range f.Steps {
+		if step.ID != "heartbeat" {
+			continue
+		}
+		if !strings.Contains(step.Description, "gt deacon heartbeat") {
+			t.Error("heartbeat step must contain \"gt deacon heartbeat\" command")
+		}
+		if len(step.Needs) != 1 || step.Needs[0] != "brief-in" {
+			t.Errorf("heartbeat must depend only on \"brief-in\", got %v", step.Needs)
+		}
 	}
 
 	// inbox-check must depend on heartbeat
@@ -391,5 +411,145 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 	}
 	if !foundMandatoryHandoff {
 		t.Error("deacon patrol formula must require gt handoff after patrol report")
+	}
+}
+
+// runnableLines returns the lines of a step description that could execute if a
+// session pasted them: everything except blank lines, shell comments, and lines
+// inside a `>` blockquote — the shape every prohibition block in these formulas
+// uses, so that quoting a banned command in prose does not read as invoking it.
+func runnableLines(desc string) []string {
+	var out []string
+	for _, line := range strings.Split(desc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+// TestDeaconPatrolCarriesServedWispProtections verifies that the five
+// protection blocks that used to exist ONLY in the hand-patched served-wisp
+// lineage are present in the formula SOURCE.
+//
+// Why this test exists (gt-9yi, hq-hazr): a wisp description is a snapshot
+// taken at pour time, and pours are deterministic from source — two consecutive
+// pours (hq-wisp-xa4dw, hq-wisp-ibqtr) were measured byte-identical. So a
+// protection that lives only in a patched wisp does not survive the next pour,
+// and re-applying it by hand every cycle is a one-cycle half-life: the mayor's
+// `gt compact` ban was gone from the next pour 40 minutes after it was made.
+// Dropping a block is silent — no error, no ledger trace — which is exactly
+// what an assertion is for.
+//
+// Related: hq-gk8d (standing wisp-GC ruling), hq-zj0l (idle-triage property
+// test), gt-9ab (the source strip this completes).
+func TestDeaconPatrolCarriesServedWispProtections(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing deacon patrol formula: %v", err)
+	}
+
+	steps := make(map[string]string, len(f.Steps))
+	for _, s := range f.Steps {
+		steps[s.ID] = s.Description
+	}
+
+	requirePresent := func(stepID string, substrings ...string) {
+		t.Helper()
+		desc, ok := steps[stepID]
+		if !ok {
+			t.Errorf("step %q is missing from the deacon patrol formula", stepID)
+			return
+		}
+		for _, want := range substrings {
+			if !strings.Contains(desc, want) {
+				t.Errorf("step %q no longer carries %q\n"+
+					"This protection exists only here; a pour that drops it drops it silently.\n"+
+					"See gt-9yi, hq-hazr.", stepID, want)
+			}
+		}
+	}
+
+	// (1) Step 0 brief-in: read the standing rulings before running anything.
+	requirePresent("brief-in",
+		"bd show hq-gk8d",
+		"bd show hq-hazr",
+		"gt mail inbox",
+		"delete, purge, force, prune, reap, or GC",
+		"DIFF, DO NOT OVERWRITE")
+
+	// (2) Rotation exclusion for interactions.jsonl — after the 1449-wisp loss
+	// this local append-only file is the sole surviving record of wisp history.
+	requirePresent("log-maintenance",
+		"ROTATION EXCLUSION",
+		"/gt/.beads/interactions.jsonl",
+		"sole surviving record of wisp history")
+
+	// (3) The served-wisp audit / self-propagation step.
+	requirePresent("served-wisp-audit",
+		"SNAPSHOT TAKEN AT POUR TIME",
+		"PRE-EXECUTION CHECK",
+		"DIFF, NOT OVERWRITE")
+
+	// (4) Idle triage, with check 3 as a property test rather than an
+	// enumeration of known-bad states (hq-zj0l).
+	requirePresent("loop-or-exit",
+		"TRIAGE FIRST, THEN DECIDE",
+		"hq-zj0l",
+		"session_start",
+		"CHECK 3 MUST TEST")
+	if desc, ok := steps["loop-or-exit"]; ok {
+		foundPropertyTest := false
+		for _, line := range runnableLines(desc) {
+			if strings.Contains(line, "gt polecat list") && strings.Contains(line, "!='idle'") {
+				foundPropertyTest = true
+			}
+		}
+		if !foundPropertyTest {
+			t.Error("loop-or-exit check 3 must be the state != idle property test.\n" +
+				"An enumeration of known-bad states missed state=review-needed within\n" +
+				"15 minutes of going live. See hq-zj0l, gt-9yi.")
+		}
+		if strings.Contains(desc, "Reset the idle counter and start next patrol cycle") {
+			t.Error("loop-or-exit still resets the idle counter unconditionally on signal.\n" +
+				"await-signal returns on ANY beads activity; an unconditional reset gives\n" +
+				"a fully idle town a full patrol every ~17 minutes. See hq-zj0l.")
+		}
+	}
+
+	// (5) The gt compact ban: compaction deletes closed wisps past TTL, which is
+	// the hq-gk8d banned shape reached by another road. Only the weekly rollup,
+	// which branches before runDailyDigest and never compacts, stays runnable.
+	//
+	// NOTE the served-wisp text this block was carried from recommended
+	// `gt compact report --dry-run` as a read-only substitute. It is not one:
+	// runDailyDigest shells out to `gt compact --json` (compact_report.go:160)
+	// as a separate process with no --dry-run, thirty-six lines before its own
+	// dry-run guard (:196), so the subprocess reaches deleteWisp's
+	// `bd delete --force` (compact.go:393). Carrying that claim into source
+	// would have made a false safety claim durable, so it was corrected here
+	// rather than reproduced. Tracked for a tooling split on hq-la3m.
+	requirePresent("compact-report",
+		"BANNED IN ITS MUTATING FORM",
+		"hq-gk8d",
+		"IS ALSO BANNED — IT IS NOT READ-ONLY")
+	if desc, ok := steps["compact-report"]; ok {
+		for _, line := range runnableLines(desc) {
+			if !strings.HasPrefix(line, "gt compact") {
+				continue
+			}
+			if !strings.Contains(line, "--weekly") {
+				t.Errorf("compact-report has a runnable compaction command: %q\n"+
+					"`gt compact report` runs compaction as a side effect of sending a\n"+
+					"digest, deleting closed wisps past TTL — and --dry-run does NOT\n"+
+					"suppress it. Only --weekly is safe. See hq-gk8d, hq-hazr, hq-la3m.", line)
+			}
+		}
 	}
 }
