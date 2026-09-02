@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testenv"
 )
 
 // TestMain sets up a dedicated tmux server for the package's integration tests.
@@ -12,6 +14,15 @@ import (
 // down after all tests complete. This prevents test sessions from appearing on
 // the user's interactive tmux and avoids socket conflicts with other packages.
 func TestMain(m *testing.M) {
+	// Isolate HOME and the Dolt endpoint first. This package does not import
+	// the beads SDK, but its tests spawn tmux — and the shells and gt/bd
+	// commands tmux runs inherit this process's environment wholesale, so an
+	// unisolated tmux test can reach the developer's real HOME and the
+	// production Dolt server just as effectively as a direct caller. tmux.test
+	// was one of the binaries observed running during the ~/.beads-planning
+	// writes in cl-69h (cl-qaj3).
+	cleanup := testenv.IsolateProcessEnv()
+
 	socket := fmt.Sprintf("gt-test-%d", os.Getpid())
 
 	// Set defaultSocket so NewTmux() connects to the test server, not the
@@ -34,5 +45,6 @@ func TestMain(m *testing.M) {
 	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
 	SetDefaultSocket("")
 
+	cleanup()
 	os.Exit(code)
 }

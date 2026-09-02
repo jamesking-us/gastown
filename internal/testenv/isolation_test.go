@@ -1,7 +1,8 @@
-package testutil
+package testenv
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,77 @@ func TestSetDoltEndpointEnv(t *testing.T) {
 func TestUnreachableDoltPortIsNotProduction(t *testing.T) {
 	if UnreachableDoltPort == "3307" {
 		t.Fatal("UnreachableDoltPort must not be the production Dolt port")
+	}
+}
+
+// TestAssertProcessEnvIsolatedWithDoltServer covers the guard the
+// container-backed packages use: it must accept the endpoint a test container
+// publishes, and it must still reject the two values that mean "pointed at the
+// production Dolt server" (cl-qaj3).
+func TestAssertProcessEnvIsolatedWithDoltServer(t *testing.T) {
+	cleanup := IsolateProcessEnv()
+	t.Cleanup(cleanup)
+	t.Cleanup(func() { SetDoltEndpointEnv("127.0.0.1", UnreachableDoltPort) })
+
+	// The two endpoints it must accept: the unreachable address isolation set,
+	// and the ephemeral port a test container publishes over it.
+	for _, port := range []string{UnreachableDoltPort, "49711"} {
+		SetDoltEndpointEnv("127.0.0.1", port)
+		if problems := productionEndpointProblems(); len(problems) != 0 {
+			t.Errorf("port %q rejected: %v", port, problems)
+		}
+		AssertProcessEnvIsolatedWithDoltServer(t)
+	}
+
+	// The two it must not: the production port, and unset — which falls back
+	// to exactly that port, the mistake cl-69h was.
+	for _, port := range []string{ProductionDoltPort, ""} {
+		SetDoltEndpointEnv("127.0.0.1", port)
+		if len(productionEndpointProblems()) != len(doltEndpointVars.ports) {
+			t.Errorf("port %q accepted; it resolves to the production Dolt server", port)
+		}
+	}
+}
+
+// TestProductionDoltPortIsNotTheUnreachableOne pins the literal this package
+// duplicates from doltserver.DefaultPort rather than importing (testenv must
+// stay free of gastown dependencies — see the package comment).
+func TestProductionDoltPortIsNotTheUnreachableOne(t *testing.T) {
+	if ProductionDoltPort == UnreachableDoltPort {
+		t.Fatal("ProductionDoltPort and UnreachableDoltPort must differ")
+	}
+}
+
+// TestGoToolchainEnvSurvivesIsolation pins the fix for the knock-on effect of
+// moving HOME: GOPATH, GOMODCACHE and GOCACHE default to paths under it, so a
+// test that shells out to `go build` would otherwise get an empty module cache
+// and an empty build cache — a full re-download and rebuild per run, and a
+// hard failure with no network (cl-qaj3).
+func TestGoToolchainEnvSurvivesIsolation(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no go toolchain on PATH")
+	}
+	for _, key := range []string{"GOPATH", "GOMODCACHE", "GOCACHE"} {
+		t.Setenv(key, "")
+	}
+
+	home := os.Getenv("HOME")
+
+	cleanup := IsolateProcessEnv()
+	t.Cleanup(cleanup)
+
+	for _, key := range []string{"GOPATH", "GOMODCACHE", "GOCACHE"} {
+		got := os.Getenv(key)
+		if got == "" {
+			t.Errorf("%s is unset after isolation: it now resolves under the temporary HOME", key)
+			continue
+		}
+		if strings.HasPrefix(got, os.Getenv("HOME")) {
+			t.Errorf("%s = %q, which is inside the isolated HOME — the cache is empty and every build starts from nothing", key, got)
+		}
+	}
+
+	if os.Getenv("HOME") == home {
+		t.Fatal("HOME unchanged; the rest of this test proves nothing")
 	}
 }

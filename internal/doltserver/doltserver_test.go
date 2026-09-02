@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/steveyegge/gastown/internal/testenv"
 )
 
 // =============================================================================
@@ -1847,6 +1849,10 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// This test asserts the no-endpoint-configured fallback, so it must control
+	// the endpoint rather than inherit the isolation one (cl-qaj3).
+	testenv.WithoutDoltEndpoint(t)
+
 	// Simulate stale metadata with wrong port (13729 instead of 3307)
 	stale := map[string]interface{}{
 		"backend":          "dolt",
@@ -2436,6 +2442,10 @@ func TestListDatabases_MixedContent(t *testing.T) {
 // =============================================================================
 
 func TestGetConnectionString(t *testing.T) {
+	// This test asserts the no-endpoint-configured fallback, so it must control
+	// the endpoint rather than inherit the isolation one (cl-qaj3).
+	testenv.WithoutDoltEndpoint(t)
+
 	townRoot := t.TempDir()
 	s := GetConnectionString(townRoot)
 	if s != "root@tcp(127.0.0.1:3307)/" {
@@ -2444,6 +2454,10 @@ func TestGetConnectionString(t *testing.T) {
 }
 
 func TestGetConnectionStringForRig(t *testing.T) {
+	// This test asserts the no-endpoint-configured fallback, so it must control
+	// the endpoint rather than inherit the isolation one (cl-qaj3).
+	testenv.WithoutDoltEndpoint(t)
+
 	townRoot := t.TempDir()
 	s := GetConnectionStringForRig(townRoot, "hq")
 	if s != "root@tcp(127.0.0.1:3307)/hq" {

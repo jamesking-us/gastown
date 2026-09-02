@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/testenv"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -16,7 +17,7 @@ func TestMain(m *testing.M) {
 	// spawns bd cannot reach the developer's real HOME or the production Dolt
 	// server on the default port (cl-69h). The container setup below overrides
 	// the endpoint with its own, which is why this must come first.
-	cleanup := testutil.IsolateProcessEnv()
+	cleanup := testenv.IsolateProcessEnv()
 
 	// Force sequential test execution to avoid bd file locks on Windows.
 	_ = flag.Set("test.parallel", "1")

@@ -1,4 +1,4 @@
-package rig
+package convoy
 
 import (
 	"testing"

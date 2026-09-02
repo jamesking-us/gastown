@@ -1,4 +1,4 @@
-package rig
+package refinery
 
 import (
 	"testing"
@@ -11,5 +11,5 @@ import (
 // letting the tests quietly resume writing to the real HOME and to the
 // production Dolt server.
 func TestProcessEnvIsIsolated(t *testing.T) {
-	testenv.AssertProcessEnvIsolated(t)
+	testenv.AssertProcessEnvIsolatedWithDoltServer(t)
 }
