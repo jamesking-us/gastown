@@ -15,6 +15,8 @@ import (
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
+
+	"github.com/steveyegge/gastown/internal/testenv"
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
@@ -123,7 +125,7 @@ func startSharedDoltContainer() {
 	// Publish the whole endpoint set, not just two of the six variables: an
 	// isolated test process has the others pointed at an unreachable port, and
 	// a leftover there would send some code paths back to the default 3307.
-	SetDoltEndpointEnv(host, doltCtrPort)
+	testenv.SetDoltEndpointEnv(host, doltCtrPort)
 	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1") //nolint:tenv // integration tests reuse this container
 }
 
@@ -162,10 +164,11 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 
 	portStr := port.Port()
 	// Scoped to the test, but the full set for the same reason as above.
-	for _, key := range doltEndpointVars.hosts {
+	hosts, ports := testenv.DoltEndpointVars()
+	for _, key := range hosts {
 		t.Setenv(key, host)
 	}
-	for _, key := range doltEndpointVars.ports {
+	for _, key := range ports {
 		t.Setenv(key, portStr)
 	}
 	return portStr

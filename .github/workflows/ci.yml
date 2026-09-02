@@ -145,6 +145,15 @@ jobs:
           version: v2.11.4
           args: --timeout=5m
 
+      # Static half of the cl-69h / cl-qaj3 test-isolation control: every
+      # package whose test binary can reach bd, the beads SDK or a Dolt server
+      # must isolate its process. Re-derives the list from the import graph, so
+      # a new package that reaches them is a lint failure rather than a silent
+      # write to someone's real HOME and production Dolt server. Compiles
+      # nothing and runs no tests.
+      - name: Test-isolation coverage
+        run: scripts/guards/isolation-coverage-guard.sh
+
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest

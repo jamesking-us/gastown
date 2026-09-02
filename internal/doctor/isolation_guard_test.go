@@ -1,4 +1,4 @@
-package rig
+package doctor
 
 import (
 	"testing"

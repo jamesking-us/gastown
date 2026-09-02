@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/testenv"
 )
 
 // TestProcessEnvIsIsolated is the standing positive control for cl-69h: it
@@ -11,5 +11,5 @@ import (
 // letting the tests quietly resume writing to the real HOME and to the
 // production Dolt server.
 func TestProcessEnvIsIsolated(t *testing.T) {
-	testutil.AssertProcessEnvIsolated(t)
+	testenv.AssertProcessEnvIsolated(t)
 }

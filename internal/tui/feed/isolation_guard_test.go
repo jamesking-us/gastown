@@ -1,4 +1,4 @@
-package rig
+package feed
 
 import (
 	"testing"

@@ -1,4 +1,4 @@
-package rig
+package deacon
 
 import (
 	"testing"

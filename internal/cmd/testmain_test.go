@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/testenv"
 )
 
 // TestMain isolates the package's test process before any test runs.
@@ -19,7 +19,7 @@ import (
 // The integration build of this package has its own TestMain in
 // integration_testmain_test.go; keep the two in sync.
 func TestMain(m *testing.M) {
-	cleanup := testutil.IsolateProcessEnv()
+	cleanup := testenv.IsolateProcessEnv()
 	code := m.Run()
 	cleanup()
 	os.Exit(code)

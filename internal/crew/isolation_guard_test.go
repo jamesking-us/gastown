@@ -1,4 +1,4 @@
-package rig
+package crew
 
 import (
 	"testing"

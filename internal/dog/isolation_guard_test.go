@@ -1,4 +1,4 @@
-package rig
+package dog
 
 import (
 	"testing"
