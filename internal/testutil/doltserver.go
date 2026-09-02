@@ -27,6 +27,7 @@ var (
 	doltCtrOnce sync.Once
 	doltCtrErr  error
 	doltCtrPort string
+	doltCtrHost string
 	dockerOnce  sync.Once
 	dockerAvail bool
 )
@@ -111,11 +112,19 @@ func startSharedDoltContainer() {
 		return
 	}
 
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		host = "127.0.0.1"
+	}
+
 	doltCtr = ctr
+	doltCtrHost = host
 	doltCtrPort = p.Port()
-	os.Setenv("GT_DOLT_PORT", doltCtrPort)    //nolint:tenv // intentional process-wide env
-	os.Setenv("BEADS_DOLT_PORT", doltCtrPort) //nolint:tenv // intentional process-wide env
-	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1")   //nolint:tenv // integration tests reuse this container
+	// Publish the whole endpoint set, not just two of the six variables: an
+	// isolated test process has the others pointed at an unreachable port, and
+	// a leftover there would send some code paths back to the default 3307.
+	SetDoltEndpointEnv(host, doltCtrPort)
+	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1") //nolint:tenv // integration tests reuse this container
 }
 
 // StartIsolatedDoltContainer starts a per-test Dolt container and returns the
@@ -146,8 +155,19 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		t.Fatalf("getting mapped port: %v", err)
 	}
 
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		host = "127.0.0.1"
+	}
+
 	portStr := port.Port()
-	t.Setenv("GT_DOLT_PORT", portStr)
+	// Scoped to the test, but the full set for the same reason as above.
+	for _, key := range doltEndpointVars.hosts {
+		t.Setenv(key, host)
+	}
+	for _, key := range doltEndpointVars.ports {
+		t.Setenv(key, portStr)
+	}
 	return portStr
 }
 
@@ -182,7 +202,10 @@ func RequireDoltContainer(t *testing.T) {
 
 // DoltContainerAddr returns the address (host:port) of the Dolt container.
 func DoltContainerAddr() string {
-	return "127.0.0.1:" + doltCtrPort
+	if doltCtrHost == "" {
+		return "127.0.0.1:" + doltCtrPort
+	}
+	return doltCtrHost + ":" + doltCtrPort
 }
 
 // DoltContainerPort returns the mapped host port of the Dolt container.
