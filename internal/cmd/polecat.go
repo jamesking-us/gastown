@@ -1803,7 +1803,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 	if batchPurge && len(purgeRigs) > 0 {
 		for _, r := range purgeRigs {
-			purgeClosedEphemeralBeads(beads.New(r.Path))
+			purgeClosedEphemeralBeads(beads.New(r.Path), detectSender(), r.Name)
 		}
 	}
 
@@ -1957,7 +1957,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol
 	// cycles, etc. accumulate across sessions and pollute bd ready/list (hq-6161m).
 	if opts.PurgeClosedEphemerals {
-		purgeClosedEphemeralBeads(beads.New(r.Path))
+		purgeClosedEphemeralBeads(beads.New(r.Path), detectSender(), r.Name)
 	}
 
 	return nil
@@ -2182,7 +2182,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if batchPurge && nuked > 0 {
-				purgeClosedEphemeralBeads(beads.New(r.Path))
+				purgeClosedEphemeralBeads(beads.New(r.Path), detectSender(), r.Name)
 			}
 			fmt.Printf("\n%s Nuked %d stale polecat(s).\n", style.SuccessPrefix, nuked)
 

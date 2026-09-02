@@ -6,6 +6,7 @@ package events
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,6 +70,12 @@ const (
 	TypeMergeFailed  = "merge_failed"
 	TypeMergeSkipped = "merge_skipped"
 
+	// Wisp lifecycle events. Wisp deletion is unrecoverable — wisps live in
+	// dolt_ignore, so no wisp table is ever committed and there is no AS OF to
+	// read back (hq-6ewp). The audit record is the only surviving trace, so it
+	// is written BEFORE the delete, not after (hq-g3zx).
+	TypeWispPurge = "wisp_purge"
+
 	// Scheduler events
 	TypeSchedulerEnqueue        = "scheduler_enqueue"         // Bead scheduled for deferred dispatch
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
@@ -104,15 +111,46 @@ func LogAudit(eventType, actor string, payload map[string]interface{}) error {
 	return Log(eventType, actor, payload, VisibilityAudit)
 }
 
+// ErrNoWorkspace reports that no Gas Town workspace was in scope, so the event
+// was not recorded anywhere. Log swallows this case and returns nil, which is
+// correct for best-effort telemetry but useless to a caller that must not act
+// unless the record landed. Those callers use LogAuditDurable and check this.
+var ErrNoWorkspace = errors.New("no Gas Town workspace found: event not recorded")
+
+// LogAuditDurable is LogAudit for callers that treat the audit record as a
+// precondition rather than a courtesy: it returns a non-nil error whenever the
+// event did not reach ~/gt/.events.jsonl, including the no-workspace case.
+//
+// Use it before an unrecoverable action, so "I could not record this" and
+// "I recorded this" are distinguishable and the action can be declined.
+func LogAuditDurable(eventType, actor string, payload map[string]interface{}) error {
+	return writeStrict(Event{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Source:     "gt",
+		Type:       eventType,
+		Actor:      actor,
+		Payload:    payload,
+		Visibility: VisibilityAudit,
+	})
+}
+
 // write appends an event to the events file.
 // Uses flock for cross-process synchronization — sync.Mutex only protects
 // intra-process goroutines, but multiple gt processes write concurrently.
 func write(event Event) error {
+	if err := writeStrict(event); err != nil && !errors.Is(err, ErrNoWorkspace) {
+		return err
+	}
+	return nil
+}
+
+// writeStrict is write without the no-workspace exemption: it reports
+// ErrNoWorkspace instead of pretending the event was recorded.
+func writeStrict(event Event) error {
 	// Find town root
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
-		// Silently ignore - we're not in a Gas Town workspace
-		return nil
+		return ErrNoWorkspace
 	}
 
 	eventsPath := filepath.Join(townRoot, EventsFile)
@@ -182,6 +220,24 @@ func DonePayload(beadID, branch string) map[string]interface{} {
 		"bead":   beadID,
 		"branch": branch,
 	}
+}
+
+// WispPurgePayload creates a payload for wisp purge events. phase is "planned"
+// (written before any delete, and the record that survives a mid-purge crash)
+// or "completed". ids names every wisp in the set, because after the delete
+// there is nothing left to name them.
+func WispPurgePayload(phase, scope, db string, ids []string, extra map[string]interface{}) map[string]interface{} {
+	p := map[string]interface{}{
+		"phase": phase,
+		"scope": scope,
+		"db":    db,
+		"count": len(ids),
+		"ids":   ids,
+	}
+	for k, v := range extra {
+		p[k] = v
+	}
+	return p
 }
 
 // MailPayload creates a payload for mail events.

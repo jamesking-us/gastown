@@ -41,6 +41,14 @@ This is a convenience command for polecats that:
 4. Exits the polecat session after durable handoff
    (Witness/refinery cleanup owns the retired sandbox)
 
+Wisp cleanup: gt done deletes the closed step wisps of THIS session's own
+molecule, and nothing else. Wisps belonging to other agents, and wisps that
+carry comments or a keep label, are left alone; if the session's molecule
+cannot be determined, nothing is purged. Every deletion is recorded to
+~/gt/.events.jsonl (type wisp_purge) before it happens, and a purge that
+cannot be recorded does not run. Database-wide reaping lives in the
+deliberate surfaces: gt dolt sync --gc and gt maintain.
+
 Exit statuses:
   COMPLETED      - Work done, MR submitted (default)
   ESCALATED      - Hit blocker, needs human intervention
@@ -2316,6 +2324,11 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 		}
 	}
 
+	// ownedMoleculeID scopes the wisp purge below to this session's own work.
+	// Declared out here because the gotos into doneStateUpdate skip past the
+	// block that fills it in, and an unset scope must reach the purge as "".
+	var ownedMoleculeID string
+
 	// Workflow step beads (*-wfs-*) are ephemeral formula steps managed by the workflow
 	// engine. For these, DEFERRED means "step complete, no code commits" not "work
 	// paused for resumption". Close them on DEFERRED so the convoy can advance.
@@ -2361,6 +2374,8 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			// Order matters: wisp closes -> unblocks base bead -> base bead closes.
 			attachment := beads.ParseAttachmentFields(hookedBead)
 			if attachment != nil && attachment.AttachedMolecule != "" {
+				ownedMoleculeID = attachment.AttachedMolecule
+
 				// Close molecule step descendants before closing the wisp root.
 				// bd close doesn't cascade — without this, open/in_progress steps
 				// from the molecule stay stuck forever after gt done completes.
@@ -2407,11 +2422,16 @@ doneStateUpdate:
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
 	}
 
-	// Purge closed ephemeral beads (wisps) accumulated during this and prior sessions.
-	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol cycles,
-	// etc. accumulate across sessions and pollute bd ready/list output (hq-6161m).
+	// Purge the closed step wisps of THIS session's molecule, so mol-polecat-work
+	// steps don't accumulate across sessions (hq-6161m).
+	//
+	// Scoped to the completing agent's own molecule subtree. This call used to be
+	// an unscoped `bd purge --force`, which deleted every closed wisp in the rig
+	// database on every completion — other agents' evidence included (hq-g3zx).
+	// An empty ownedMoleculeID means the scope is unknown, and purgeOwnClosedWisps
+	// then purges nothing.
 	// Best-effort: failures are non-fatal since the work is already done.
-	purgeClosedEphemeralBeads(bd)
+	purgeOwnClosedWisps(bd, detectSender(), ctx.Rig, ownedMoleculeID)
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
 	// for audit purposes and anomaly detection by witness patrol.
@@ -2724,25 +2744,4 @@ func stripOverlayCLAUDEmd(g *git.Git, defaultBranch, baseRef string) bool {
 	fmt.Printf("%s Created cleanup commit to remove Gas Town overlay files\n",
 		style.Bold.Render("✓"))
 	return true
-}
-
-// purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated
-// during this and prior sessions. Polecat/witness sessions create mol-polecat-work
-// steps, mol-witness-patrol cycles, etc. as wisps. These get closed during normal
-// operation but are never deleted, accumulating hundreds of rows that pollute
-// bd ready/list output. (hq-6161m)
-//
-// Best-effort: errors are logged but don't block gt done completion.
-func purgeClosedEphemeralBeads(bd *beads.Beads) {
-	out, err := bd.Run("purge", "--force", "--quiet")
-	if err != nil {
-		// Non-fatal: purge failure shouldn't block session completion
-		fmt.Fprintf(os.Stderr, "Warning: wisp purge failed: %v\n", err)
-		return
-	}
-	// bd purge --force --quiet outputs the count of purged beads
-	outStr := strings.TrimSpace(string(out))
-	if outStr != "" && outStr != "0" {
-		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
-	}
 }
