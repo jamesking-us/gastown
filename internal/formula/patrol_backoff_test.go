@@ -524,21 +524,31 @@ func TestDeaconPatrolCarriesServedWispProtections(t *testing.T) {
 	}
 
 	// (5) The gt compact ban: compaction deletes closed wisps past TTL, which is
-	// the hq-gk8d banned shape reached by another road. Only the read-only
-	// dry-run and the (non-compacting) weekly rollup may remain runnable.
+	// the hq-gk8d banned shape reached by another road. Only the weekly rollup,
+	// which branches before runDailyDigest and never compacts, stays runnable.
+	//
+	// NOTE the served-wisp text this block was carried from recommended
+	// `gt compact report --dry-run` as a read-only substitute. It is not one:
+	// runDailyDigest shells out to `gt compact --json` (compact_report.go:160)
+	// as a separate process with no --dry-run, thirty-six lines before its own
+	// dry-run guard (:196), so the subprocess reaches deleteWisp's
+	// `bd delete --force` (compact.go:393). Carrying that claim into source
+	// would have made a false safety claim durable, so it was corrected here
+	// rather than reproduced. Tracked for a tooling split on hq-la3m.
 	requirePresent("compact-report",
 		"BANNED IN ITS MUTATING FORM",
 		"hq-gk8d",
-		"gt compact report --dry-run")
+		"IS ALSO BANNED — IT IS NOT READ-ONLY")
 	if desc, ok := steps["compact-report"]; ok {
 		for _, line := range runnableLines(desc) {
-			if !strings.HasPrefix(line, "gt compact report") {
+			if !strings.HasPrefix(line, "gt compact") {
 				continue
 			}
-			if !strings.Contains(line, "--dry-run") && !strings.Contains(line, "--weekly") {
-				t.Errorf("compact-report has a runnable mutating compaction command: %q\n"+
+			if !strings.Contains(line, "--weekly") {
+				t.Errorf("compact-report has a runnable compaction command: %q\n"+
 					"`gt compact report` runs compaction as a side effect of sending a\n"+
-					"digest, deleting closed wisps past TTL. See hq-gk8d, hq-hazr.", line)
+					"digest, deleting closed wisps past TTL — and --dry-run does NOT\n"+
+					"suppress it. Only --weekly is safe. See hq-gk8d, hq-hazr, hq-la3m.", line)
 			}
 		}
 	}

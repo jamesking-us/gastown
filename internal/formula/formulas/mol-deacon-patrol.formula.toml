@@ -1098,14 +1098,31 @@ Generate and send the daily compaction digest.
 > incidents ago; this road to the same destination stayed open because it is named
 > after its harmless half.
 >
-> **WHAT TO RUN INSTEAD — the dry-run, always, first:**
-> ```bash
-> gt compact report --dry-run
-> ```
-> It is read-only and it already answers the question the step exists to ask. Measured
-> 2026-09-01T23:00Z it returned "Compaction digest already sent for 2026-09-01
-> (bead: hq-ia5l)" — i.e. nothing was owed and no deletion path needed touching.
-> Record `compact-report:OK` with that evidence.
+> **⛔ `gt compact report --dry-run` IS ALSO BANNED — IT IS NOT READ-ONLY. ⛔**
+> **The served-wisp text this block was carried from said "it is read-only". THAT CLAIM
+> IS FALSE, measured against the source 2026-09-02.** `--dry-run` suppresses only the
+> SENDING of the digest. `runDailyDigest` (`internal/cmd/compact_report.go:136`) shells
+> out to `gt compact --json` at **line 160** — a SEPARATE PROCESS, with no `--dry-run`
+> passed — and the dry-run guard that returns early is at **line 196, thirty-six lines
+> later**. The subprocess therefore has `compactDryRun == false` and reaches
+> `deleteWisp`'s `bd delete --force` (`internal/cmd/compact.go:393`). **The flag you
+> would reach for as the safe option performs the exact deletion the ban forbids.**
+>
+> **Why the 2026-09-01T23:00Z measurement looked clean, and why it no longer holds:**
+> it returned "Compaction digest already sent for 2026-09-01 (bead: hq-ia5l)" and cost
+> nothing — but that is the IDEMPOTENCY SHORT-CIRCUIT at line 152 returning *before*
+> line 160, i.e. an accident of that day's state, NOT a property of the flag. The
+> deacon recorded the moment it expired: at 2026-09-02T00:00Z the date rolled, no
+> digest was yet owed for the new day, the short-circuit stopped applying, and the
+> call at line 160 became live. **A safety claim that rests on a short-circuit is a
+> safety claim with an expiry date on it.**
+>
+> **THERE IS NO SAFE RUNNABLE FORM OF THIS STEP WHILE THE BAN STANDS.** Run nothing
+> here. Record `compact-report:SKIP` naming the ban, and — if a digest is genuinely
+> owed — file it as the tooling split below rather than reaching for a flag.
+> The only `gt compact report` form left runnable in this step is `--weekly`, which
+> branches to `runWeeklyRollup` at `compact_report.go:129` *before* `runDailyDigest`
+> and never calls compaction (verified 2026-09-02).
 >
 > **The digest half is legitimate and SEVERABLE** (mayor). If a digest is ever genuinely
 > owed while the ban stands, that is a **tooling split to file** — a report-only mode —
@@ -1116,15 +1133,15 @@ Generate and send the daily compaction digest.
 > `promoted:null deleted:null skipped:0` against 169 wisps past TTL. **null is not a
 > measured zero** — do not report it as one, and do not read it as proof compaction
 > would be a no-op.
+>
+> **What the banned form does, recorded so nobody has to run it to find out:** it runs
+> compaction (capturing JSON results), queries active wisps, builds a per-category
+> breakdown (Heartbeats, Patrols, Errors, Untyped), detects anomalies, sends the digest
+> to deacon/ (cc mayor/), and creates a permanent `wisp.compaction` event bead. The
+> compaction is the first of those, not the last. Tracked for a report-only split on
+> **hq-la3m**; delete this whole block when that ships and the ban lifts.
 
-This runs compaction (capturing JSON results), queries active wisps,
-builds a per-category breakdown (Heartbeats, Patrols, Errors, Untyped),
-detects anomalies, and sends the digest to deacon/ (cc mayor/).
-
-A permanent event bead (wisp.compaction) is created for audit trail.
-Skips automatically if today's digest was already sent.
-
-**Step 2: Weekly rollup (Mondays only, idempotent)**
+**Weekly rollup (Mondays only, idempotent)**
 If today is Monday, also send the weekly rollup:
 ```bash
 gt compact report --weekly
