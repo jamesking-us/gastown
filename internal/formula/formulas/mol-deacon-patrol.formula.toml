@@ -41,6 +41,7 @@ When `await-signal` outputs `EFFORT: reduced`, run an ABBREVIATED patrol.
 This happens when idle_cycles >= {{idle_effort_threshold}} (no activity detected).
 
 Abbreviated patrol rules:
+- **brief-in**: ALWAYS run. Abbreviated does not mean unbriefed — a standing ban you have not read is a ban you are about to break.
 - **heartbeat**: ALWAYS run (required by daemon).
 - **inbox-check**: Run `gt mail drain` only. Skip individual message processing unless drain reports unprocessed HELP or RECOVERED_BEAD messages.
 - **orphan-process-cleanup**: SKIP.
@@ -66,13 +67,14 @@ Abbreviated patrol rules:
 - **log-maintenance**: SKIP.
 - **patrol-cleanup**: Quick inbox check only.
 - **context-check**: Quick self-assessment (one sentence).
+- **served-wisp-audit**: ALWAYS run. Propagation must not depend on effort level; a cycle that skips it drops the protections for every session that follows.
 - **loop-or-exit**: Normal (await-signal as usual).
 
 When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mode).
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -84,8 +86,52 @@ description = "Idle cycles before switching to abbreviated patrol (0 = always fu
 default = "1"
 
 [[steps]]
+id = "brief-in"
+title = "Brief in before anything else"
+description = """
+**This step exists because the `inbox-check` step used to precede any brief-in, so a fresh session
+could not learn a standing ban until after it had already violated it.** A clean
+context is not a safety margin — it is the exposure. Run this FIRST, before the
+heartbeat, before any other step:
+
+```bash
+bd show hq-gk8d      # STANDING RULING: no wisp GC of any variant, any seat, any path
+bd show hq-hazr      # live incident/evidence bead — read the most recent notes
+gt mail inbox        # rulings arrive here; check before acting on any formula step
+```
+
+**Rule of construction (finding-grade, from the 2026-09-01 incident):** if a step in
+this document tells you to delete, purge, force, prune, reap, or GC anything, STOP and
+confirm against hq-gk8d that it is still permitted before you run it. The document you
+are reading can be older than the ruling that forbids what it says.
+
+> **PATCH-LEVEL DIVERGENCE IS BIDIRECTIONAL — measured 2026-09-01 ~20:25Z, deacon.**
+> Do not assume the wisp you are served carries the newest text of every step.
+> THIS wisp (hq-wisp-f09e) had Steps 0/24/26b/27 patched but a STALE Step 13, while
+> the wisp poured at 20:16Z had the NEWER Step 13 (removing `gt health --json` per
+> mayor directive cycle 647) and was missing all four of the others. A session
+> served this wisp ran `gt health --json` against a directive it could not see.
+> Step 13 below has since been merged in from that newer pour.
+> [CARRY NOTE, gt-9yi: that merge happened in the served-wisp lineage ONLY. The
+> `dolt-health` step in THIS source still runs `gt health --json`, which the
+> hq-o41v mayor directive removed. Carrying that removal is tracked on gt-apx;
+> delete this note when it lands. The `inbox-check` PROHIBITED block here is
+> likewise the shorter gt-9ab one, not the served-wisp text — tracked on gt-clr.]
+> **THEREFORE, when you patch a wisp in `served-wisp-audit`: DIFF, DO NOT OVERWRITE.**
+> Compare section by section and keep the newer of each. A blind copy in either
+> direction silently reverts a mayor directive.
+>
+> **AND NOTE THE HOOK DOES NOT ADVANCE.** `gt patrol report` closes and pours a
+> wisp on a lineage that is NOT what `gt hook` serves: measured 20:16-20:25Z,
+> reports closed hq-wisp-0v67z and hq-wisp-zagh4 and poured hq-wisp-mhqrj while
+> `gt hook` kept serving THIS wisp, 2h old and never closed. So patching "the next
+> wisp" does not reach the next session — PATCH THE WISP `gt hook` ACTUALLY SERVES.
+> Tracked with the rest of the served-wisp family on hq-qi3a / hq-gk8d."""
+
+[[steps]]
 id = "heartbeat"
 title = "Refresh heartbeat"
+needs = ["brief-in"]
 description = """
 Signal liveness to the daemon.
 
@@ -97,7 +143,8 @@ so the daemon knows we are alive.
 gt deacon heartbeat "starting patrol cycle"
 ```
 
-This MUST run before any other step. Skipping it risks the daemon killing a healthy
+This MUST run before any step other than `brief-in`, which is three cheap reads and
+precedes it by mayor order. Skipping it risks the daemon killing a healthy
 Deacon mid-cycle."""
 
 [[steps]]
@@ -1037,10 +1084,38 @@ needs = ["wisp-compact"]
 description = """
 Generate and send the daily compaction digest.
 
-**Step 1: Send daily digest (idempotent — safe to run every cycle)**
-```bash
-gt compact report
-```
+> ## ⛔ `gt compact report` IS BANNED IN ITS MUTATING FORM — MAYOR RULING, 2026-09-01T23:0xZ ⛔
+> **RULING, verbatim in substance:** `gt compact` is **IN SCOPE** of the hq-gk8d ban.
+> The ban's text is "no wisp GC of any variant, any seat, any path", and compaction's
+> deletion of closed wisps past TTL is **closed + age** — the exact banned shape
+> reached by another road. Do NOT run the mutating form until hq-hazr's fix of record
+> ships. Recorded on hq-gk8d.
+>
+> **THE TRAP IS THAT THIS STEP DOES NOT LOOK LIKE A GC STEP.** It is titled "send a
+> digest", and the deleting happens as a side effect. `gt compact report --help` says
+> it plainly — "Run compaction + send daily digest" — so the evidence is one flag away,
+> but nothing in the step title or body warns you. The `inbox-check` step was disarmed months of
+> incidents ago; this road to the same destination stayed open because it is named
+> after its harmless half.
+>
+> **WHAT TO RUN INSTEAD — the dry-run, always, first:**
+> ```bash
+> gt compact report --dry-run
+> ```
+> It is read-only and it already answers the question the step exists to ask. Measured
+> 2026-09-01T23:00Z it returned "Compaction digest already sent for 2026-09-01
+> (bead: hq-ia5l)" — i.e. nothing was owed and no deletion path needed touching.
+> Record `compact-report:OK` with that evidence.
+>
+> **The digest half is legitimate and SEVERABLE** (mayor). If a digest is ever genuinely
+> owed while the ban stands, that is a **tooling split to file** — a report-only mode —
+> **not a reason to run compact**. File it; do not reason your way to the mutating form
+> because the digest is due.
+>
+> **Related, same cycle:** `gt compact --dry-run --json` still returns
+> `promoted:null deleted:null skipped:0` against 169 wisps past TTL. **null is not a
+> measured zero** — do not report it as one, and do not read it as proof compaction
+> would be a no-op.
 
 This runs compaction (capturing JSON results), queries active wisps,
 builds a per-category breakdown (Heartbeats, Patrols, Errors, Untyped),
@@ -1131,6 +1206,29 @@ needs = ["patrol-digest"]
 description = """
 Maintain daemon logs and state files.
 
+> ## ⛔ ROTATION EXCLUSION — /gt/.beads/interactions.jsonl ⛔
+>
+> **Do NOT rotate, truncate, prune, or delete `/gt/.beads/interactions.jsonl`, and do
+> not run any rotation that would.** Until further notice (mayor order, 2026-09-01),
+> it is the **sole surviving record of wisp history** after the 1449-wisp loss — the
+> Dolt `interactions` TABLE is empty (0 rows), so this local append-only FILE is the
+> only copy. Its only backups are:
+> `/gt/deacon/incident-2026-09-01-wispgc/interactions-snapshot-160Z.jsonl`
+>   sha256 `92b667621c28c0dfd7613677c7d1ac46f78039cf0b710e8d9bd75a3d4a8011dc`
+> `/gt/deacon/incident-2026-09-01-wispgc/issues-snapshot-1511Z.jsonl`
+>   sha256 `aac3619b82a6e8cc397333e82aefae238aeb19b7c103cab1e4d9453d958dc5f0`
+> **Verify both sha256s each cycle** and re-snapshot if the live file has grown.
+> LATER SNAPSHOTS EXIST and are NOT covered by the two hashes above — as of
+> 2026-09-01T23:00Z the directory also holds interactions-snapshot-2007Z /
+> -2235Z / -2300Z.jsonl, each with its sha256 appended to `snapshot-hashes.txt`
+> in the same directory. **Do not read the two-hash list above as the full
+> backup inventory** — it is a fixed pair of anchors, not a census. `ls` the
+> directory and `cat snapshot-hashes.txt` for the real one. The 2300Z snapshot
+> (6932 lines) was taken this cycle because the live file had grown past 2235Z
+> (6900); `gt daemon rotate-logs` was a no-op ("below threshold") and left
+> interactions.jsonl byte-identical, verified by sha256 either side.
+> See hq-gk8d and hq-qi3a.
+
 **Step 1: Rotate oversized logs**
 
 The daemon automatically rotates logs every heartbeat (3 min), but the deacon
@@ -1199,9 +1297,11 @@ Check own context limit.
 
 The Deacon runs in a Claude session with finite context. Check if approaching the limit:
 
-```bash
-gt context --usage
-```
+> **⛔ `gt context --usage` DOES NOT EXIST — there is no `gt context` command
+> at all.** Re-confirmed 2026-09-01T23:00Z. Do not run it and do not report its
+> failure as a context reading. SELF-ASSESS instead: judge remaining headroom
+> from the size of this session's own transcript and say so in one sentence,
+> naming it as a self-assessment rather than a measurement.
 
 If context is high (>80%), prepare for handoff:
 - Summarize current state
@@ -1211,9 +1311,112 @@ If context is high (>80%), prepare for handoff:
 This enables the Deacon to burn and respawn cleanly."""
 
 [[steps]]
+id = "served-wisp-audit"
+title = "Propagate this patch to the next patrol wisp"
+needs = ["context-check"]
+description = '''
+**A wisp description is a SNAPSHOT TAKEN AT POUR TIME.** A wisp poured before a fix
+carries the armed text forever, and *the wisp is what executes* — not the formula file.
+"The formula file is patched" is NOT the same claim as "what the next session will be
+told to do is patched." That gap is what destroyed 1449 wisps on 2026-09-01.
+
+**MERGE PERFORMED 2026-09-01T22:40Z (deacon) — A WORKED EXAMPLE OF WHY THIS STEP SAYS DIFF, NOT OVERWRITE.**
+The served wisp hq-wisp-f09e and the newer-poured hq-wisp-kx5qv each carried text the other
+lacked, in BOTH directions, exactly as the divergence block at the top predicts:
+  f09e ONLY:  Step 0, Step 24 rotation exclusion, Step 26b, Step 27 TRIAGE block + check-3,
+              the hq-gk8d-era Step 2 prohibition (Harm 4 / never-follow-the-hint / served-wisp).
+  kx5qv ONLY: the Step 2 DOG-CLEARING guard as amended cycle 646 (mayor-authorized, hq-z70b) —
+              "ABSENCE NEVER SATISFIES (a)", pane-as-primary-instrument, and the (b)
+              positive-listing requirement.
+f09e still contained the exact clause that amendment STRUCK (the one blessing a `bd show` miss
+as a pass, citing hq-r0l9 — deliberately NOT quoted verbatim here, so that the invariant grep
+below stays a clean binary instead of matching this note). Overwriting kx5qv with f09e would have silently
+REVERTED a mayor directive and restored a permissive hole in front of a `--force`; overwriting
+f09e with kx5qv would have dropped Step 0 and the Step 24 exclusion. NEITHER wisp was a safe
+base. The merged text below takes f09e as the base and restores kx5qv's newer (a)/(b) block.
+Verified after write by re-reading STORED text: 0 runnable `bd mol wisp gc` lines,
+0 lines matching `^ *\(a\) .bd show <mol>.` (the struck clause, gone), and the
+operative "ABSENCE NEVER SATISFIES" present in Step 2. (Total string count is 3, not 1 — this
+provenance note mentions it twice. Count LINES IN STEP 2, not whole-document occurrences.)
+NOTE ALSO, for whoever maintains `log-maintenance`: its "only backups" list names just the 160Z and 1511Z
+snapshots, but 2007Z and 2235Z snapshots now exist in the same directory. That list is stale.
+And `context-check` tells you to run `gt context --usage`; there is no `gt context` command at all.
+Both of those are now FIXED IN THIS TEXT (2026-09-01T23:00Z) rather than merely flagged.
+
+**NEW, FINDING-GRADE, ADDED 2026-09-01T23:00Z — THE WRONG-CWD ALL-CLEAR. Same
+permissive-empty family as everything else on this document, new surface.**
+`bd` resolves its database FROM THE CURRENT WORKING DIRECTORY. Run it from a
+directory outside a beads workspace (a scratchpad, /tmp, a dog worktree) and it
+does not return empty — it EXITS WITH AN ERROR: "Error: no beads database
+found". The trap is what happens next: if you are auditing with a counter such
+as `grep -c PATTERN <output>`, the error text does not match your pattern, so
+the counter returns **0**, and 0 reads as CLEAN. Measured live this cycle: an
+invariant sweep of all 9 hooked/pinned wisps was run with a `cd` into a
+scratchpad first, and reported `armed_runnable=0 PROHIBITED=0 gc_mentions=0`
+for every wisp — i.e. it simultaneously claimed the wisps were disarmed AND
+that the prohibition text was missing, which is self-contradictory. Re-run from
+/gt/deacon the same sweep returned 1808-line documents with PROHIBITED=4 and
+gc_mentions=5. **A three-line file was being graded as a patrol wisp.**
+RULE: any audit loop that greps command output MUST first assert the command
+SUCCEEDED and that the output is the expected SHAPE — check the exit status,
+or `grep -q '^Error:'`, or simply that the byte/line count is plausible — before
+believing a zero. A zero from a command that never ran is not a measurement.
+And state the seat/cwd you audited from, the same way prefix resolution already
+requires (hq-5fj6).
+
+**PROVENANCE, 2026-09-01T23:0xZ — THE SOURCE FORMULA IS NOW FIXED, AND THE POUR IS STILL NOT SAFE.**
+gt-9ab ("strip hq-hazr-banned wisp GC from the patrol formula SOURCES") landed on gastown
+origin/main at 1b276db0..6782d066 this cycle. The next wisp poured after it, hq-wisp-xa4dw,
+was measured immediately and is GENUINELY UNARMED: its Step 2 code fence now reads
+`# REMOVED — see the PROHIBITED block below. Run nothing here.`, and its only two
+`bd mol wisp gc` occurrences are both prohibition prose. That is the fix of record working.
+**BUT THE SAME POUR WAS REGRESSED ON FOUR BLOCKS THAT ONLY EVER LIVED IN THE SERVED-WISP
+LINEAGE:** it had NO Step 0 brief-in, NO Step 24 rotation exclusion (the interactions.jsonl
+protection — the sole surviving record of wisp history), NO Step 26b, and NO Step 27
+TRIAGE-FIRST block or its check-3 property test (so its Step 27 still said "Reset the idle
+counter" unconditionally, the behaviour that gave a fully idle town a full 27-step patrol
+every ~17 minutes). It also still carried the FALSE "use closed-only cleanup here"
+recommendation and the dead `gt context --usage`.
+**THE LESSON, AND IT IS THE WHOLE REASON THIS STEP EXISTS:** "the source is fixed" and
+"the next session is safe" REMAIN DIFFERENT CLAIMS even after the source fix lands. A
+source fix repairs ONE defect; it does not carry forward the accumulated patches of the
+lineage it replaces, and a fresh pour can be simultaneously safer AND more regressed than
+the wisp it succeeds. **Diff every pour against the served text. Never assume a newer
+pour dominates an older one.**
+
+**Therefore the ban must travel in the document itself.** Before this cycle ends, if a
+next patrol wisp has been poured, patch it before you finish:
+
+```bash
+# 1. Read the SERVED text of the next patrol wisp (not the formula file):
+bd show <next-wisp-id>
+# 2. If its inbox-check step contains a runnable 'bd mol wisp gc' command, it is ARMED.
+#    Copy this wisp's brief-in step, the inbox-check PROHIBITED block, the
+#    log-maintenance rotation exclusion, the loop-or-exit TRIAGE-FIRST block
+#    INCLUDING its check-3 property test (hq-zj0l), and this served-wisp-audit
+#    step into it, replacing the raw command:
+bd update <next-wisp-id> -d "$(...patched text...)"
+# 3. Verify by re-reading the stored text — the update's own output is not evidence:
+bd show <next-wisp-id> | grep -c 'PROHIBITED'
+```
+
+**PRE-EXECUTION CHECK, binds every seat (deacon, witness, refinery), armed at the
+gastown witness seat 2026-09-01):** at session start, read the HOOKED WISP'S OWN step
+text — via `gt prime` / `bd show <wisp>`, *not* the formula file, because those are
+different surfaces. If it carries a runnable `bd mol wisp gc`, **do not run it**:
+report it and request a freshly poured wisp. A session that reads armed text has no
+reason to doubt it, which is exactly why the check cannot live only in memory or in a
+handoff — it must be in the served text. See hq-gk8d, hq-qi3a, hq-hazr, lesson 278.
+
+**Dating caveat for evidence readers:** hq-hazr measurements of the closed-wisp
+population taken before 2026-09-01T16:03Z (the 06:09:48 wall, the 1229->1416 counts)
+describe a population that no longer exists. Date them; they are evidence about a past
+state, not a current one.'''
+
+[[steps]]
 id = "loop-or-exit"
 title = "Loop or exit for respawn"
-needs = ["context-check"]
+needs = ["served-wisp-audit"]
 description = """
 End of patrol cycle decision.
 
@@ -1243,11 +1446,64 @@ This command:
 4. Tracks `idle:N` label on hq-deacon bead for backoff state
 5. Outputs `EFFORT: reduced` or `EFFORT: full` directive for next cycle
 
-**On signal received** (activity detected):
-Reset the idle counter and start next patrol cycle:
+**On signal received** (activity detected) — ⛔ TRIAGE FIRST, THEN DECIDE ⛔
+(mayor order 2026-09-01, hq-wisp-n72j; tracked on **hq-zj0l**)
+
+**DO NOT reset the idle counter just because a signal arrived.** `await-signal`
+returns on ANY beads activity and carries no notion of whose activity it is or
+whether it represents WORK — an infrastructure heartbeat is indistinguishable
+from a polecat finishing a task. Measured: `boot` emits a `session_start` every
+~17 minutes (15:20:48, 15:37:57, 15:55:08, 16:12:31, 16:29:33, 16:53:07,
+17:10:04). Each one used to reset the counter, so the backoff collapsed
+60s -> 2m -> 4m -> 8m -> SIGNAL -> 60s forever, and a fully idle town got a FULL
+27-STEP PATROL every ~17 minutes indefinitely.
+
+**RUN THE TRIAGE CHECK — three cheap queries:**
 ```bash
-gt agents state hq-deacon --set idle=0
+gt mq list <each rig>          # any merge-queue entries?
+gt mail inbox                  # any messages?
+
+# Check 3 — PROPERTY TEST, not an enumeration of bad states:
+gt polecat list --all --json | python3 -c "import sys,json;print(sum(1 for r in json.load(sys.stdin) if r.get('state')!='idle'))"
 ```
+
+> **⛔ CHECK 3 MUST TEST `state != idle`, NOT grep for known-bad values.**
+> It originally read `grep -ciE 'working|stalled'` and MISSED a real condition within
+> 15 minutes of going live: on 2026-09-01T17:46Z the overseer escalated two stuck
+> polecats while this check reported zero, because minuteman was `state=review-needed`
+> — a genuine non-idle state that is in neither 'working' nor 'stalled'.
+> **AN ENUMERATION IS ONLY AS GOOD AS THE AUTHOR'S IMAGINATION ON THE DAY.**
+> (Accuracy note: 'working' and 'stalled' ARE real states — the grep was INCOMPLETE,
+> not dead. Do not repeat the stronger always-passes claim; it was checked and is false.)
+>
+> **DO NOT add `needs_recovery` / `verdict=NEEDS_RECOVERY` to this trigger.** All 28
+> polecats currently carry it — a NORMALIZED STANDING BACKLOG, not work in flight.
+> Folding it in would make triage permanently non-empty and rebuild the always-full
+> wake this mechanism exists to kill. `gt sling`'s reuse path services it on demand.
+>
+> **DIVISION OF LABOR (mayor ruling hq-wisp-vi07) — this is not a gap:**
+> **TRIAGE DETECTS WORK. The OVERSEER-TO-MAYOR MAIL ROUTE DETECTS MAINTENANCE.**
+> A polecat that is `state=idle` but needs recovery (e.g. scavenger) is invisible to
+> this check BY DESIGN — the overseer's dashboard sees what no in-town instrument
+> watches and routes it to the mayor. Nothing waits on deacon triage for that.
+
+**Then branch on the result:**
+- **ANY non-empty** -> REAL WORK. Reset the counter and run a full patrol:
+  ```bash
+  gt agents state hq-deacon --set idle=0
+  ```
+- **ALL THREE empty** -> SPURIOUS WAKE. **Do NOT reset idle:N.** Record the
+  spurious wake (actor + event type) and RESUME THE BACKOFF CLIMB where it was.
+
+**SAFETY PROPERTY, stated so this change is auditable:** you still WAKE and LOOK on
+every single signal. Nothing that those three checks would catch can be slept
+through, because real work always manifests in at least one of them. What changes
+is only whether a *look that found nothing* is allowed to reset the backoff.
+
+**THIS IS AN INTERIM, AND IT IS SEAT-SIDE — which is exactly the drift risk it
+exists to work around.** The fix of record is destination-side: `await-signal`
+gains an actor/type filter so every seat benefits and no one hand-rolls this.
+Tracked on **hq-zj0l**, routed beside hq-qi3a. Do not mistake this block for the fix.
 
 **On timeout** (no activity):
 The idle counter was auto-incremented. Continue to next patrol cycle
@@ -1266,6 +1522,7 @@ After await-signal returns, check the EFFORT directive in the output:
 **If `EFFORT: full`** — Run all steps thoroughly (normal patrol).
 
 **If `EFFORT: reduced`** — Run ABBREVIATED patrol:
+- brief-in: ALWAYS run
 - heartbeat: ALWAYS run
 - inbox-check: Quick drain only, skip individual messages unless HELP/RECOVERED_BEAD
 - orphan-process-cleanup through fire-notifications: SKIP all
@@ -1275,6 +1532,7 @@ After await-signal returns, check the EFFORT directive in the output:
 - wisp-compact through log-maintenance: SKIP all
 - patrol-cleanup: Quick inbox check only
 - context-check: One-sentence self-assessment
+- served-wisp-audit: ALWAYS run
 
 Abbreviated patrol should complete in ~10% of the tokens of a full patrol.
 Mark skipped steps as SKIP in the patrol report.
@@ -1289,7 +1547,7 @@ After await-signal returns (either by signal or timeout):
 gt patrol report --summary "<brief summary>" \
   --steps "heartbeat:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
-The --steps flag is REQUIRED. List ALL 26 steps with their actual status.
+The --steps flag is REQUIRED. List ALL 28 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created
