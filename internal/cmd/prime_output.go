@@ -530,11 +530,16 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
 		fmt.Println("2. Check if any mail was injected above in this output")
 		fmt.Println("3. If you have mail with work instructions → execute that work")
-		fmt.Println("4. If NO mail → run `" + cli.Name() + " done` IMMEDIATELY")
+		fmt.Println("4. If NO mail → run `" + cli.Name() + " done --status DEFERRED` IMMEDIATELY")
 		fmt.Println()
 		fmt.Println("Polecat sessions are ephemeral. No work on hook + no mail = terminate.")
 		fmt.Println("DO NOT wait. DO NOT escalate. DO NOT send idle alerts.")
-		fmt.Println("Just run `" + cli.Name() + " done` and exit.")
+		fmt.Println("Just run `" + cli.Name() + " done --status DEFERRED` and exit.")
+		fmt.Println()
+		fmt.Println("Use `--status DEFERRED` because it exits without submitting anything.")
+		fmt.Println("A plain `" + cli.Name() + " done` here would try to submit the branch this")
+		fmt.Println("sandbox happens to be on — work you were not given and nobody reviewed —")
+		fmt.Println("and is refused (cl-lqj). Whatever is on the branch stays there.")
 	case RoleRefinery:
 		if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
 			fmt.Println()

@@ -328,6 +328,14 @@ if [ "$1" = "show" ] && [ "$2" = "gt-mr" ]; then
   exit 0
 fi
 if [ "$1" = "list" ]; then
+  # The seat is holding its work: gt done refuses to submit from an empty hook
+  # (cl-lqj), so the assignment lookup has to find the bead the polecat is on.
+  case "$*" in
+    *hooked*)
+      echo '[{"id":"bd-source","title":"owner source","status":"hooked","assignee":"gastown/polecats/refuge","priority":1,"issue_type":"task"}]'
+      exit 0
+      ;;
+  esac
   echo '[]'
   exit 0
 fi

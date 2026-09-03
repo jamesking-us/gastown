@@ -49,6 +49,14 @@ cannot be determined, nothing is purged. Every deletion is recorded to
 cannot be recorded does not run. Database-wide reaping lives in the
 deliberate surfaces: gt dolt sync --gc and gt maintain.
 
+Submitting requires a hook. A seat with no bead hooked or in progress was slung
+no work, so a COMPLETED exit carrying commits is refused (cl-lqj) — nothing is
+pushed and no merge request is created. This holds whether or not the seat is
+the assignee of the bead its branch name decodes to: being the assignee is not
+the same as holding the work, and a session that was handed nothing cannot
+decide that anything is finished. A polecat with nothing to do exits with
+--status DEFERRED, which submits nothing.
+
 Exit statuses:
   COMPLETED      - Work done, MR submitted (default)
   ESCALATED      - Hit blocker, needs human intervention
@@ -920,6 +928,62 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Get configured default branch for this rig
+	defaultBranch := "main" // fallback
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
+
+	// cl-lqj INVARIANT: an empty hook must never lead to a submitted merge
+	// request. This runs before the done-intent label, the exiting heartbeat,
+	// and every push, MR and close below, so a refusal leaves behind no trace
+	// of a completion nobody chose. See done_empty_hook.go for the measurement
+	// that rules out the obvious assignee/open-bead check.
+	polecatSeat := doneSeatIsPolecat(sender, os.Getenv("GT_POLECAT"))
+	var activeHook []string
+	hookVerified := false
+	if exitType == ExitCompleted && polecatSeat {
+		activeHook = loadAssignedIssueIDs()
+
+		// Fail closed on both git reads: a count we could not take is treated
+		// as work to submit, matching the assumption the submit path itself
+		// makes further down.
+		guardAhead, guardAheadErr := g.CommitsAhead(baseRef, "HEAD")
+		if guardAheadErr != nil {
+			guardAhead, guardAheadErr = g.CommitsAhead(defaultBranch, branch)
+		}
+		if guardAheadErr != nil {
+			guardAhead = 1
+		}
+		// Mirrors the "MR already submitted" fallback below exactly: a branch
+		// already on the remote with nothing unpushed still yields an MR. A
+		// failed lookup is not treated as work — with no commits ahead and no
+		// readable remote state, no path below creates a merge request anyway.
+		guardPushedWithWork := false
+		if branch != defaultBranch {
+			pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, "origin")
+			guardPushedWithWork = pushErr == nil && pushed && unpushed == 0
+		}
+
+		if refusal := refuseEmptyHookSubmit(emptyHookSubmit{
+			ExitType:             exitType,
+			PolecatSeat:          polecatSeat,
+			Seat:                 sender,
+			Branch:               branch,
+			ActiveHook:           activeHook,
+			CommitsAhead:         guardAhead,
+			BranchPushedWithWork: guardPushedWithWork,
+		}); refusal != nil {
+			// Loud: the witness owns hookless seats, and a seat that just tried
+			// to submit without one is the anomaly it needs to see. Nudges are
+			// free and cost no Dolt commit.
+			nudgeWitness(rigName, fmt.Sprintf("EMPTY_HOOK_SUBMIT_REFUSED %s branch=%s (cl-lqj)", polecatName, branch))
+			return refusal
+		}
+		hookVerified = hasActiveHook(activeHook)
+	}
+
 	// Write done-intent label EARLY, before push/MR operations.
 	// If gt done crashes after this point, the Witness can detect the intent
 	// and auto-nuke the zombie polecat.
@@ -946,13 +1010,6 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" && townRoot != "" {
 		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 	}
-
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
-	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
 
 	// For COMPLETED, we need an issue ID and branch must not be the default branch
 	var mrID string
@@ -1070,8 +1127,17 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					bd = beads.New(cwd)
 				}
 
-				skipClose := false
-				if skipReason, fatal := doneSourceCloseSkipReason(bd, issueID, sourceIssueForNoMerge); skipReason != "" {
+				// cl-lqj: a seat with an empty hook has no standing to close
+				// the bead its branch name happens to decode to. That bead was
+				// not slung here, and the mayor may have just reopened it for
+				// somebody else.
+				skipClose := emptyHookBlocksSourceClose(polecatSeat, activeHook)
+				if skipClose {
+					emptyHookReason := fmt.Sprintf("no bead on this seat's hook — not closing %s, which was decoded from branch %q rather than slung here (cl-lqj)", issueID, branch)
+					style.PrintWarning("%s", emptyHookReason)
+					fmt.Printf("  The bead stays open for witness/mayor review.\n")
+					notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, emptyHookReason)
+				} else if skipReason, fatal := doneSourceCloseSkipReason(bd, issueID, sourceIssueForNoMerge); skipReason != "" {
 					style.PrintWarning("%s", skipReason)
 					fmt.Printf("  The bead will remain open for witness/mayor review.\n")
 					notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, skipReason)
@@ -1740,6 +1806,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			if agentBeadID != "" {
 				description += fmt.Sprintf("\nagent_bead: %s", agentBeadID)
+			}
+			// cl-lqj: record that this submission cleared the empty-hook
+			// invariant — the seat was holding the work when it submitted.
+			// Recorded at submit time because it cannot be reconstructed
+			// afterwards: the hook is released as the polecat retires.
+			if hookVerified {
+				description += "\nhook_verified: true"
 			}
 
 			// Add conflict resolution tracking fields (initialized, updated by Refinery)

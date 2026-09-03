@@ -264,6 +264,13 @@ with = "macro-formula"
 4. Witness/refinery cleanup handles any retired sandbox state
 ```
 
+`gt done` submits only from a hook. A seat with no bead hooked or in progress
+was slung no work, so it has no completion to declare: the submit is refused
+(cl-lqj), nothing is pushed, and no MR bead is created. That covers a restarted
+session whose bead was reassigned away AND one that is still the assignee of an
+open bead — being the assignee is not the same as holding the work. A polecat
+with nothing to do exits with `gt done --status DEFERRED`, which submits nothing.
+
 ### Session Cycling
 
 ```
