@@ -1054,6 +1054,26 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	} else {
 		input.GitCheckFailed = true
 	}
+	// The rig clone is not the sandbox. Cross-repo work lives in a sibling
+	// checkout that a nuke destroys just the same, and reading only the clone
+	// yields a confident verdict about a fraction of the work at risk
+	// (cl-hwl, lesson 318).
+	if risk := siblingCheckoutRisk(clonePath); risk.Present() {
+		if risk.Dirty {
+			input.GitDirty = true
+			if input.GitDirtyReason == "" {
+				input.GitDirtyReason = risk.DirtyReason
+			}
+		}
+		input.StashCount += risk.StashCount
+		input.UnpushedCommits += risk.UnpushedCommits
+		if risk.CheckFailed {
+			input.GitCheckFailed = true
+			if input.GitCheckFailedReason == "" {
+				input.GitCheckFailedReason = risk.CheckFailedReason
+			}
+		}
+	}
 	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
 	activeMRSafe := true
 	sourceTerminal := fields != nil && issueID != "" && witnessIssueTerminal(rigBeads, issueID)
@@ -3460,12 +3480,24 @@ func issueStatusFromShowJSON(output string) string {
 	return ""
 }
 
+// activeMRGitSafe reports whether a polecat's sandbox holds nothing that would
+// be lost. It is scoped to the WHOLE sandbox: proving the rig clone safe proves
+// nothing about a sibling scratch checkout a nuke destroys too (cl-hwl).
 func activeMRGitSafe(workDir, rigName, polecatName string) bool {
 	townRoot := workDirToTownRoot(workDir)
 	if townRoot == "" || rigName == "" || polecatName == "" {
 		return false
 	}
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	_, checkouts := polecat.SandboxCheckouts(clonePath)
+	for _, path := range checkouts {
+		if path == clonePath {
+			continue
+		}
+		if !checkoutGitSafe(path) {
+			return false
+		}
+	}
 	g := git.NewGit(clonePath)
 	branch, err := g.CurrentBranch()
 	if err != nil || branch == "" {
@@ -3483,6 +3515,97 @@ func activeMRGitSafe(workDir, rigName, polecatName string) bool {
 		return false
 	}
 	return pushed && unpushed == 0
+}
+
+// checkoutGitSafe reports whether one checkout holds nothing that would be lost.
+// Anything it cannot read is not safe.
+func checkoutGitSafe(worktreePath string) bool {
+	g := git.NewGit(worktreePath)
+	branch, err := g.CurrentBranch()
+	if err != nil || branch == "" {
+		return false
+	}
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		return false
+	}
+	if !status.CleanExcludingRuntime() || status.StashCount > 0 || status.UnpushedCommits > 0 {
+		return false
+	}
+	pushed, unpushed, err := g.BranchPushedToRemote(branch, "origin")
+	if err != nil {
+		return false
+	}
+	return pushed && unpushed == 0
+}
+
+// sandboxSiblingRisk is the work at risk in a polecat sandbox OUTSIDE its rig
+// clone. It is kept separate from the clone's own facts so a caller can see
+// that the two were measured, rather than inferring one from the other.
+type sandboxSiblingRisk struct {
+	Checkouts         int
+	Dirty             bool
+	DirtyReason       string
+	StashCount        int
+	UnpushedCommits   int
+	CheckFailed       bool
+	CheckFailedReason string
+}
+
+// Present reports whether any sibling checkout exists at all.
+func (r sandboxSiblingRisk) Present() bool { return r.Checkouts > 0 }
+
+// siblingCheckoutRisk measures every checkout in a polecat sandbox except the
+// rig clone. A sibling that cannot be read is recorded as a check failure,
+// never as an absence of work: "we did not look" must not reach a destructive
+// classifier wearing the same face as "there is nothing there" (cl-hwl).
+func siblingCheckoutRisk(clonePath string) sandboxSiblingRisk {
+	var risk sandboxSiblingRisk
+	_, checkouts := polecat.SandboxCheckouts(clonePath)
+	for _, path := range checkouts {
+		if path == clonePath {
+			continue
+		}
+		risk.Checkouts++
+		g := git.NewGit(path)
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			risk.CheckFailed = true
+			if risk.CheckFailedReason == "" {
+				risk.CheckFailedReason = fmt.Sprintf("git_state=unmeasured checkout=%s: %v", filepath.Base(path), err)
+			}
+			continue
+		}
+		if !status.CleanExcludingRuntime() {
+			risk.Dirty = true
+			if risk.DirtyReason == "" {
+				risk.DirtyReason = fmt.Sprintf("git_state=has_uncommitted checkout=%s", filepath.Base(path))
+			}
+		}
+		risk.StashCount += status.StashCount
+
+		branch, branchErr := g.CurrentBranch()
+		preservation, preserveErr := g.BranchPreservationStatus(branch, "origin", nil)
+		if preserveErr == nil {
+			risk.UnpushedCommits += preservation.UnpreservedPatchCount
+			continue
+		}
+		// No ref to compare HEAD against is the case where the commits here
+		// exist nowhere else. Reporting it as zero is the inversion this bead
+		// exists to remove.
+		risk.CheckFailed = true
+		if risk.CheckFailedReason == "" {
+			reason := preserveErr.Error()
+			if errors.Is(preserveErr, git.ErrNoComparisonRefs) {
+				reason = "no remote, upstream, or target ref to compare HEAD against"
+			}
+			if branchErr != nil {
+				reason = fmt.Sprintf("%s (current branch unreadable: %v)", reason, branchErr)
+			}
+			risk.CheckFailedReason = fmt.Sprintf("git_state=unmeasured checkout=%s: %s", filepath.Base(path), reason)
+		}
+	}
+	return risk
 }
 
 func terminalSafeDoneSnapshot(bd *BdCli, workDir, rigName, polecatName string, snap *agentBeadSnapshot) bool {

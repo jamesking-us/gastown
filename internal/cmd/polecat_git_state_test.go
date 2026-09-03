@@ -10,8 +10,10 @@ import (
 func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
+	remote := filepath.Join(dir, "remote.git")
 	worktree := filepath.Join(dir, "other")
 
+	runGitCmd(t, "", "init", "--bare", remote)
 	runGitCmd(t, "", "init", repo)
 	runGitCmd(t, repo, "config", "user.email", "test@example.com")
 	runGitCmd(t, repo, "config", "user.name", "Test User")
@@ -19,9 +21,16 @@ func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
 	runGitCmd(t, repo, "add", "file.txt")
 	runGitCmd(t, repo, "commit", "-m", "base")
 	runGitCmd(t, repo, "branch", "-M", "main")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "push", "-u", "origin", "main")
 	runGitCmd(t, repo, "checkout", "-b", "other")
+	runGitCmd(t, repo, "push", "-u", "origin", "other")
 	runGitCmd(t, repo, "checkout", "main")
 	runGitCmd(t, repo, "worktree", "add", worktree, "other")
+	// The branch is pushed so this test isolates STASH ATTRIBUTION. Without a
+	// remote the checkout has no ref to compare HEAD against, which is now
+	// reported as unmeasured rather than silently as zero commits at risk
+	// (cl-hwl) — a different fact, and not the one under test here.
 
 	writeTestFile(t, filepath.Join(repo, "file.txt"), "base\nmain change\n")
 	runGitCmd(t, repo, "stash", "push", "-m", "main-only")

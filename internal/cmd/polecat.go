@@ -883,6 +883,35 @@ type GitState struct {
 	UnpreservedPatchCount int      `json:"unpreserved_patch_count"`
 	StashCount            int      `json:"stash_count"`                  // Current-branch stashes: per-polecat risk.
 	SharedStashCount      int      `json:"shared_stash_count,omitempty"` // Other branch stashes visible through the shared repo.
+
+	// SandboxRoot and Checkouts state the SCOPE of the claim above. A polecat
+	// sandbox can hold more than one checkout (the rig clone plus scratch
+	// clones such as gastown-fork), and a nuke destroys all of them, so a
+	// verdict derived from one checkout is a verdict about a fraction of the
+	// work at risk (cl-hwl, lesson 318). Callers that render a verdict must
+	// render this scope with it.
+	SandboxRoot string             `json:"sandbox_root,omitempty"`
+	Checkouts   []CheckoutGitState `json:"checkouts,omitempty"`
+	// Unmeasured lists checkouts whose state could not be determined, with the
+	// reason. Never empty-and-clean: an unmeasured checkout sets Clean=false,
+	// because "we did not look" must not render as "nothing is there".
+	Unmeasured []string `json:"unmeasured,omitempty"`
+}
+
+// CheckoutGitState is the work-at-risk state of one checkout inside a polecat
+// sandbox. Path is relative to SandboxRoot.
+type CheckoutGitState struct {
+	Path                  string   `json:"path"`
+	Branch                string   `json:"branch,omitempty"`
+	Primary               bool     `json:"primary,omitempty"`
+	Clean                 bool     `json:"clean"`
+	UncommittedFiles      []string `json:"uncommitted_files,omitempty"`
+	UnpushedCommits       int      `json:"unpushed_commits"`
+	ComparisonBase        string   `json:"comparison_base,omitempty"`
+	UnpreservedPatchCount int      `json:"unpreserved_patch_count"`
+	StashCount            int      `json:"stash_count"`
+	SharedStashCount      int      `json:"shared_stash_count,omitempty"`
+	Unmeasured            string   `json:"unmeasured,omitempty"`
 }
 
 func runPolecatGitState(cmd *cobra.Command, args []string) error {
@@ -918,6 +947,10 @@ func runPolecatGitState(cmd *cobra.Command, args []string) error {
 	// Human-readable output
 	fmt.Printf("%s\n\n", style.Bold.Render(fmt.Sprintf("Git State: %s/%s", r.Name, polecatName)))
 
+	// Scope first: a verdict about a sandbox is only as wide as the set of
+	// checkouts it was computed over, and a nuke destroys all of them (cl-hwl).
+	printGitStateScope(state)
+
 	// Working tree status
 	if len(state.UncommittedFiles) == 0 {
 		fmt.Printf("  Working Tree:  %s\n", style.Success.Render("clean"))
@@ -949,10 +982,16 @@ func runPolecatGitState(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Shared Stashes: %s\n", style.Dim.Render(fmt.Sprintf("%d (repo-wide, not this branch)", state.SharedStashCount)))
 	}
 
+	// Unmeasured checkouts
+	for _, u := range state.Unmeasured {
+		fmt.Printf("  Unmeasured:    %s\n", style.Error.Render(u))
+	}
+
 	// Verdict
 	fmt.Println()
 	if state.Clean {
 		fmt.Printf("  Verdict:       %s\n", style.Success.Render("CLEAN (safe to kill)"))
+		fmt.Printf("                 %s\n", style.Dim.Render(gitStateScopeSentence(state)))
 	} else {
 		fmt.Printf("  Verdict:       %s\n", style.Error.Render("DIRTY (needs cleanup)"))
 	}
@@ -960,16 +999,134 @@ func runPolecatGitState(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getGitState checks the git state of a worktree.
+// printGitStateScope lists the checkouts a git-state verdict covers, one line
+// each when the sandbox holds more than the rig clone.
+func printGitStateScope(state *GitState) {
+	if state == nil || len(state.Checkouts) <= 1 {
+		return
+	}
+	fmt.Printf("  Checkouts:     %s\n", style.Bold.Render(fmt.Sprintf("%d in sandbox", len(state.Checkouts))))
+	for _, c := range state.Checkouts {
+		detail := "clean"
+		switch {
+		case c.Unmeasured != "":
+			detail = "UNMEASURED: " + c.Unmeasured
+		case !c.Clean:
+			detail = fmt.Sprintf("dirty (%d uncommitted, %d unpushed, %d stash)", len(c.UncommittedFiles), c.UnpushedCommits, c.StashCount)
+		}
+		fmt.Printf("                 %-28s %s\n", c.Path, style.Dim.Render(detail))
+	}
+	fmt.Println()
+}
+
+// gitStateScopeSentence states what a clean verdict actually examined, so the
+// claim carries its own limits instead of implying the whole sandbox.
+func gitStateScopeSentence(state *GitState) string {
+	if state == nil || len(state.Checkouts) == 0 {
+		return "scope: unknown (no checkout was inspected)"
+	}
+	paths := make([]string, 0, len(state.Checkouts))
+	for _, c := range state.Checkouts {
+		paths = append(paths, c.Path)
+	}
+	return fmt.Sprintf("scope: %d checkout(s) at sandbox top level (%s); nested checkouts deeper than one level are not inspected",
+		len(paths), strings.Join(paths, ", "))
+}
+
+// getGitState checks the git state of a polecat sandbox.
 func getGitState(worktreePath string) (*GitState, error) {
 	return getGitStateWithTargets(worktreePath, nil)
 }
 
+// polecatSandboxCheckouts enumerates the checkouts a nuke would destroy. See
+// polecat.SandboxCheckouts: the definition is shared with the witness seat so
+// two seats cannot hold different beliefs about what a sandbox contains.
+func polecatSandboxCheckouts(clonePath string) (string, []string) {
+	return polecat.SandboxCheckouts(clonePath)
+}
+
+// getGitStateWithTargets reports the work at risk in a polecat's whole sandbox,
+// not just its rig clone. targets are merge-queue custody refs for the rig
+// clone; sibling checkouts are compared against their own remotes.
 func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, error) {
+	root, checkouts := polecatSandboxCheckouts(worktreePath)
 	state := &GitState{
 		Clean:            true,
 		UncommittedFiles: []string{},
+		SandboxRoot:      root,
 	}
+
+	for _, path := range checkouts {
+		primary := path == worktreePath
+		checkoutTargets := targets
+		if !primary {
+			checkoutTargets = nil
+		}
+		checkout, err := checkoutGitState(path, checkoutTargets)
+		if err != nil {
+			// The rig clone failing to report is the historical error contract:
+			// callers turn it into git_state=unknown and refuse cleanup.
+			if primary {
+				return nil, err
+			}
+			// A sibling checkout that cannot be measured is unmeasured, not
+			// empty. Fail closed and say which one.
+			rel := sandboxRelPath(root, path)
+			state.Clean = false
+			state.Unmeasured = append(state.Unmeasured, fmt.Sprintf("%s: %v", rel, err))
+			state.Checkouts = append(state.Checkouts, CheckoutGitState{Path: rel, Unmeasured: err.Error()})
+			continue
+		}
+		checkout.Path = sandboxRelPath(root, path)
+		checkout.Primary = primary
+		state.Checkouts = append(state.Checkouts, *checkout)
+
+		if primary {
+			state.ComparisonBase = checkout.ComparisonBase
+			state.UnpreservedPatchCount = checkout.UnpreservedPatchCount
+		}
+		for _, f := range checkout.UncommittedFiles {
+			state.UncommittedFiles = append(state.UncommittedFiles, sandboxDisplayPath(checkout.Path, primary, f))
+		}
+		state.UnpushedCommits += checkout.UnpushedCommits
+		state.StashCount += checkout.StashCount
+		state.SharedStashCount += checkout.SharedStashCount
+		if checkout.Unmeasured != "" {
+			state.Unmeasured = append(state.Unmeasured, fmt.Sprintf("%s: %s", checkout.Path, checkout.Unmeasured))
+		}
+		if !checkout.Clean {
+			state.Clean = false
+		}
+	}
+
+	return state, nil
+}
+
+// sandboxRelPath renders a checkout path relative to the sandbox root.
+func sandboxRelPath(root, path string) string {
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		if rel == "." {
+			// The clone is the sandbox (old layout); name it rather than
+			// printing a bare dot in a verdict's scope.
+			return filepath.Base(path)
+		}
+		return rel
+	}
+	return path
+}
+
+// sandboxDisplayPath qualifies a file with its checkout when the sandbox holds
+// more than the rig clone, so a blocker names the repo it came from.
+func sandboxDisplayPath(checkoutPath string, primary bool, file string) string {
+	if primary || checkoutPath == "" || checkoutPath == "." {
+		return file
+	}
+	return checkoutPath + "/" + file
+}
+
+// checkoutGitState reports the work at risk in a single checkout.
+func checkoutGitState(worktreePath string, targets []string) (*CheckoutGitState, error) {
+	state := &CheckoutGitState{Clean: true}
 
 	worktreeGit := git.NewGit(worktreePath)
 	workStatus, err := worktreeGit.CheckUncommittedWork()
@@ -987,14 +1144,31 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 		state.Clean = false
 	}
 
-	branch, _ := worktreeGit.CurrentBranch()
-	if preservation, preserveErr := worktreeGit.BranchPreservationStatus(branch, "origin", targets); preserveErr == nil {
+	branch, branchErr := worktreeGit.CurrentBranch()
+	state.Branch = branch
+	preservation, preserveErr := worktreeGit.BranchPreservationStatus(branch, "origin", targets)
+	switch {
+	case preserveErr == nil:
 		state.ComparisonBase = preservation.ComparisonBase
 		state.UnpreservedPatchCount = preservation.UnpreservedPatchCount
 		if preservation.UnpreservedPatchCount > 0 {
 			state.UnpushedCommits = preservation.UnpreservedPatchCount
 			state.Clean = false
 		}
+	default:
+		// Nothing to compare HEAD against means every commit here exists only
+		// in this checkout. Silently leaving UnpushedCommits at 0 is what made
+		// unpushed local work read as SAFE_TO_NUKE (cl-hwl): the verdict was
+		// most confident exactly where the least work had reached a remote.
+		state.Clean = false
+		reason := fmt.Sprintf("unpushed commits not measurable: %v", preserveErr)
+		if errors.Is(preserveErr, git.ErrNoComparisonRefs) {
+			reason = "no remote, upstream, or target ref to compare HEAD against; commits here exist only in this checkout"
+		}
+		if branchErr != nil {
+			reason = fmt.Sprintf("%s (current branch unreadable: %v)", reason, branchErr)
+		}
+		state.Unmeasured = reason
 	}
 
 	// Check for stashes using Git.StashCount() which filters by current branch.
@@ -1026,8 +1200,14 @@ type RecoveryStatus struct {
 	ActiveMR             string                `json:"active_mr,omitempty"`
 	Blockers             []string              `json:"blockers,omitempty"`
 	Diagnostics          []string              `json:"diagnostics,omitempty"`
-	RecoveryActions      []string              `json:"recovery_actions,omitempty"`
-	Reconciled           bool                  `json:"reconciled,omitempty"`
+	// CheckoutsInspected names every checkout the git facts came from, and
+	// UnmeasuredCheckouts every one that could not be read. Both travel with
+	// the verdict so a consumer can see the scope of "no work at risk" without
+	// re-deriving it (cl-hwl).
+	CheckoutsInspected  []string `json:"checkouts_inspected,omitempty"`
+	UnmeasuredCheckouts []string `json:"unmeasured_checkouts,omitempty"`
+	RecoveryActions     []string `json:"recovery_actions,omitempty"`
+	Reconciled          bool     `json:"reconciled,omitempty"`
 }
 
 func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
@@ -1082,18 +1262,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			input.CleanupStatus = polecat.CleanupUnknown
 			input.GitCheckFailed = true
 			input.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: %v", p.ClonePath, gitErr)
-		} else if gitState.Clean {
-			input.CleanupStatus = polecat.CleanupClean
-		} else if gitState.UnpushedCommits > 0 {
-			input.CleanupStatus = polecat.CleanupUnpushed
-			input.UnpushedCommits = gitState.UnpushedCommits
-		} else if gitState.StashCount > 0 {
-			input.CleanupStatus = polecat.CleanupStash
-			input.StashCount = gitState.StashCount
 		} else {
-			input.CleanupStatus = polecat.CleanupUncommitted
-			input.GitDirty = true
-			input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+			input.CleanupStatus = cleanupStatusFromGitState(gitState)
+			// Apply every fact, not just the one that named the status: a
+			// sandbox can be dirty AND unpushed AND unmeasured at once, and a
+			// blocker list that reports one of the three understates the loss.
+			applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, nil)
 		}
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
@@ -1160,6 +1334,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	status.CleanupStatus = input.CleanupStatus
+	applyGitStateScopeToRecoveryStatus(&status, gitState)
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
@@ -1229,9 +1404,36 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println()
 		fmt.Printf("  %s Safe to nuke - no work at risk.\n", style.Success.Render("✓"))
+		// State the scope of that claim in the same breath as the claim. An
+		// unqualified "no work at risk" is what got quoted into a destructive
+		// decision (cl-hwl); a verdict that names what it examined cannot.
+		fmt.Printf("    %s\n", style.Dim.Render(gitStateScopeSentence(gitState)))
+		if len(status.CheckoutsInspected) == 0 {
+			fmt.Printf("    %s\n", style.Warning.Render("no checkout was inspected; this verdict rests on recorded status, not on live git state"))
+		}
 	}
 
 	return nil
+}
+
+// cleanupStatusFromGitState names the cleanup status a sandbox's live git facts
+// imply when no agent bead recorded one. Unmeasured outranks the rest: an
+// unreadable checkout is unknown, never clean.
+func cleanupStatusFromGitState(gitState *GitState) polecat.CleanupStatus {
+	switch {
+	case gitState == nil:
+		return polecat.CleanupUnknown
+	case gitState.Clean:
+		return polecat.CleanupClean
+	case len(gitState.Unmeasured) > 0:
+		return polecat.CleanupUnknown
+	case gitState.UnpushedCommits > 0:
+		return polecat.CleanupUnpushed
+	case gitState.StashCount > 0:
+		return polecat.CleanupStash
+	default:
+		return polecat.CleanupUncommitted
+	}
 }
 
 func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath string, gitState *GitState, gitErr error) {
@@ -1243,6 +1445,11 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	if gitState == nil || gitState.Clean {
 		return
 	}
+	if len(gitState.Unmeasured) > 0 {
+		// A checkout we could not read is not a checkout with nothing in it.
+		input.GitCheckFailed = true
+		input.GitCheckFailedReason = fmt.Sprintf("git_state=unmeasured %s", strings.Join(gitState.Unmeasured, "; "))
+	}
 	if gitState.UnpushedCommits > 0 {
 		input.UnpushedCommits = gitState.UnpushedCommits
 	}
@@ -1251,8 +1458,22 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	}
 	if len(gitState.UncommittedFiles) > 0 {
 		input.GitDirty = true
-		input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+		input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d [%s]", len(gitState.UncommittedFiles), gitStateScope(gitState))
 	}
+}
+
+// gitStateScope names the checkouts a git verdict was computed over. It exists
+// so no caller can state a conclusion about a sandbox without stating which
+// parts of the sandbox it looked at (cl-hwl).
+func gitStateScope(gitState *GitState) string {
+	if gitState == nil || len(gitState.Checkouts) == 0 {
+		return "scope=unknown"
+	}
+	paths := make([]string, 0, len(gitState.Checkouts))
+	for _, c := range gitState.Checkouts {
+		paths = append(paths, c.Path)
+	}
+	return "checkouts=" + strings.Join(paths, ",")
 }
 
 func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error) {
@@ -1275,6 +1496,17 @@ func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *Recover
 		return
 	}
 	input.MRSubmitted = mr != nil
+}
+
+// applyGitStateScopeToRecoveryStatus records which checkouts the verdict covers.
+func applyGitStateScopeToRecoveryStatus(status *RecoveryStatus, gitState *GitState) {
+	if status == nil || gitState == nil {
+		return
+	}
+	for _, c := range gitState.Checkouts {
+		status.CheckoutsInspected = append(status.CheckoutsInspected, c.Path)
+	}
+	status.UnmeasuredCheckouts = append(status.UnmeasuredCheckouts, gitState.Unmeasured...)
 }
 
 func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, disposition polecat.WorkstateDisposition) {
@@ -1325,7 +1557,22 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 	return ""
 }
 
+// activeMRGitSafeForWorktree reports whether a polecat's sandbox holds nothing
+// that would be lost. It gates the reconciliation that discards a recorded dirty
+// cleanup_status, so it is scoped to the WHOLE sandbox: proving the rig clone
+// safe proves nothing about a sibling scratch checkout that a nuke destroys too
+// (cl-hwl, lesson 318). Any checkout that cannot be read is not safe.
 func activeMRGitSafeForWorktree(worktreePath string) bool {
+	_, checkouts := polecatSandboxCheckouts(worktreePath)
+	for _, path := range checkouts {
+		if !checkoutGitSafe(path) {
+			return false
+		}
+	}
+	return len(checkouts) > 0
+}
+
+func checkoutGitSafe(worktreePath string) bool {
 	g := git.NewGit(worktreePath)
 	branch, err := g.CurrentBranch()
 	if err != nil || branch == "" {
@@ -1441,6 +1688,9 @@ func recoveryGitStateBlocker(worktreePath string, gitState *GitState, gitErr err
 	}
 	if gitState == nil || gitState.Clean {
 		return ""
+	}
+	if len(gitState.Unmeasured) > 0 {
+		return fmt.Sprintf("git_state=unmeasured %s", strings.Join(gitState.Unmeasured, "; "))
 	}
 	if gitState.UnpushedCommits > 0 {
 		return fmt.Sprintf("git_state=has_unpushed unpushed_commits=%d", gitState.UnpushedCommits)
