@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 var (
@@ -358,6 +359,12 @@ func findExistingPatrolDigest(dateStr string) (string, error) {
 }
 
 // deletePatrolDigests deletes ephemeral patrol digest beads for a target date.
+//
+// These are ephemeral, so they are wisps, so they are in dolt_ignore and there
+// is no AS OF behind this delete (hq-6ewp). What goes here is a day's worth of
+// patrol cycle descriptions — the closest thing the town has to a narrative of
+// what its agents did that day — and the record below is the only trace of it
+// that outlives the delete. An unwritable record stops the delete.
 func deletePatrolDigests(targetDate time.Time) (int, error) {
 	// Query patrol digests for the target date
 	cycles, err := queryPatrolDigests(targetDate)
@@ -371,8 +378,21 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 
 	// Collect IDs to delete
 	var idsToDelete []string
+	doomed := make([]wispaudit.Wisp, 0, len(cycles))
 	for _, cycle := range cycles {
 		idsToDelete = append(idsToDelete, cycle.ID)
+		doomed = append(doomed, wispaudit.Wisp{ID: cycle.ID, Title: cycle.Title})
+	}
+
+	scope := "digest_date:" + targetDate.UTC().Format("2006-01-02")
+	actor := detectSender()
+	// bd routes by the working directory here rather than by an explicit
+	// database, so GT_RIG is the best name available for where these went. It
+	// can be empty, and an empty db field is honest about that.
+	db := os.Getenv("GT_RIG")
+	if err := wispaudit.Plan(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil); err != nil {
+		return 0, fmt.Errorf("not deleting %d patrol digests: the deletion could not be recorded first: %w",
+			len(doomed), err)
 	}
 
 	// Delete in batch
@@ -381,6 +401,8 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	if err := deleteCmd.Run(); err != nil {
 		return 0, fmt.Errorf("deleting patrol digests: %w", err)
 	}
+
+	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil, nil)
 
 	return len(idsToDelete), nil
 }

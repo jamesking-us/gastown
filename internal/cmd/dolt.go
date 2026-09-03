@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -1605,7 +1606,7 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 					if doltSyncDB != "" && db != doltSyncDB {
 						continue
 					}
-					purged, purgeErr := doltserver.PurgeClosedEphemerals(townRoot, db, doltSyncDry)
+					purged, purgeErr := doltserver.PurgeClosedEphemerals(townRoot, db, wispaudit.PathDoltSyncGC, doltSyncDry)
 					purgeResults[db] = struct {
 						purged int
 						err    error

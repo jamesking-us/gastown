@@ -1064,7 +1064,14 @@ gt compact --verbose
 ```
 
 This runs the compaction algorithm:
-- Closed wisps past TTL → deleted (Dolt AS OF preserves history)
+- Closed wisps past TTL → deleted. PERMANENTLY. This line used to say "Dolt AS
+  OF preserves history" and that was false, measured (hq-6ewp): the wisps table
+  family is in dolt_ignore, so no wisp table is ever committed and AS OF answers
+  table-not-found on the one table compaction deletes from. There is no undo
+  behind this step. Each deletion is recorded to <town>/.events.jsonl first, and
+  a deletion that cannot be recorded is skipped — that record is the only thing
+  that outlives the wisp, so read it, not the wisps table, when asking later
+  what a cycle removed.
 - Non-closed wisps past TTL → promoted (stuck detection)
 - Wisps with comments/references/keep labels → promoted (proven value)
 

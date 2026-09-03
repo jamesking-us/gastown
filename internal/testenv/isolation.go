@@ -46,6 +46,12 @@ import (
 // the production server.
 const UnreachableDoltPort = "63307"
 
+// TownRootVars are the variables the workspace lookup falls back to when the
+// working directory is not inside a Gas Town workspace. An isolated process
+// must have none of them set, or "no town here" silently becomes "the
+// operator's town".
+var TownRootVars = []string{"GT_TOWN_ROOT", "GT_ROOT"}
+
 // AllowRealDoltEnv opts a test process out of endpoint redirection. Set it to
 // "1" only when the caller has a real server it intends to use; the Dolt
 // container helpers in this package set the endpoint themselves and do not
@@ -121,6 +127,16 @@ func IsolateProcessEnv() func() {
 		if strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "BEADS_") || key == "GT_DOLT_DATA" {
 			unsetEnv(key)
 		}
+	}
+
+	// Strip the town-root pointers. Every agent session carries GT_TOWN_ROOT,
+	// and the workspace lookup falls back to it when the working directory is
+	// not inside a town — which is precisely the state a test in a t.TempDir()
+	// is in. Left set, a test that means "there is no town here" instead finds
+	// the operator's real one and writes to it: the audit log, the events feed,
+	// anything else keyed on the town root (hq-6ewp).
+	for _, key := range TownRootVars {
+		unsetEnv(key)
 	}
 
 	if os.Getenv(AllowRealDoltEnv) != "1" {
@@ -360,6 +376,11 @@ func assertHomeAndActorIsolated(t *testing.T) {
 
 	if got := os.Getenv("BD_ACTOR"); got != "" {
 		t.Errorf("BD_ACTOR = %q, want empty — a live agent identity must not reach test-created rows", got)
+	}
+	for _, key := range TownRootVars {
+		if got := os.Getenv(key); got != "" {
+			t.Errorf("%s = %q, want empty — a test outside a town must not fall back to the operator's real one", key, got)
+		}
 	}
 }
 

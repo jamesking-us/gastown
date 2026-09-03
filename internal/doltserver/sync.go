@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 // SyncOptions controls the behavior of SyncDatabases.
@@ -585,7 +586,13 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 // Returns the number of beads purged and any error encountered.
 // Errors are non-fatal — the caller should log them but continue with sync.
 // Must be called while the Dolt server is still running (bd purge needs SQL access).
-func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
+//
+// path names the caller for the deletion record (hq-6ewp): what this removes is
+// in dolt_ignore, so it is never committed and no AS OF can read it back, and
+// the record in <town>/.events.jsonl is the only thing that survives it. The
+// record is written first, and a database whose record will not write is not
+// purged — the caller sees an error and continues with the rest of the sync.
+func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, error) {
 	// Resolve the beads directory for this rig (read-only — never create dirs during purge)
 	beadsDir := FindRigBeadsDir(townRoot, dbName)
 
@@ -622,11 +629,29 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 		args = append(args, "--dry-run")
 	}
 
+	workDir := filepath.Dir(beadsDir) // run from parent of .beads
+
+	// bd purge reports a count and never the ids it removed, so the set is
+	// enumerated here instead and recorded before the purge runs. It is a
+	// prediction — bd applies its own definition of "closed ephemeral" and
+	// protects pinned rows — and it is recorded as one. An approximate list of
+	// names beats an exact number when the question afterwards is "what was in
+	// there", and there is no second chance to ask.
+	var doomed []wispaudit.Wisp
+	if !dryRun {
+		doomed = predictClosedEphemerals(env, workDir)
+		err := wispaudit.Plan(wispaudit.Actor("gt"), path, "database", dbName, doomed,
+			map[string]interface{}{"predicted": true})
+		if err != nil {
+			return 0, fmt.Errorf("skipping purge for %s: the deletion could not be recorded first: %w", dbName, err)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
-	cmd.Dir = filepath.Dir(beadsDir) // run from parent of .beads
+	cmd.Dir = workDir
 	cmd.Env = env
 	setProcessGroup(cmd)
 
@@ -664,7 +689,79 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 		return 0, nil
 	}
 
+	// Only on success, and only here. Every earlier return is a purge that did
+	// NOT happen, and a "completed" record for one of those would tell a later
+	// investigation that a set of wisps went when it is still sitting in the
+	// database — a false record is worse than a missing one. The planned record
+	// already stands in every case, which is the point of writing it first.
+	if !dryRun {
+		_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, nil,
+			map[string]interface{}{"predicted": true, "reported_count": *result.PurgedCount})
+	}
+
 	return *result.PurgedCount, nil
+}
+
+// predictClosedEphemerals names the wisps `bd purge` is expected to remove from
+// this database, for the deletion record.
+//
+// It goes through `bd query ephemeral=true`, not `bd list`: bd list does not
+// surface wisps (hq-v9t), so it would silently predict an empty set for exactly
+// the rows this is trying to name. An error here is not fatal — a purge with an
+// empty prediction still records that it ran, and a record naming nothing is
+// still better than no record at all.
+func predictClosedEphemerals(env []string, workDir string) []wispaudit.Wisp {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Same --allow-stale probe the purge itself uses, so the prediction is not
+	// the one call that fails on a stale database while the delete goes ahead.
+	args := beads.MaybePrependAllowStaleWithEnv(env,
+		[]string{"query", "--json", "ephemeral=true", "--all", "--limit=0"})
+	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd.Dir = workDir
+	cmd.Env = env
+	setProcessGroup(cmd)
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+
+	// bd answers an empty result set with prose ("No issues found."), which
+	// leaves nothing for extractJSONArray to find.
+	out := extractJSONArray(stdout.Bytes())
+	if len(out) == 0 || out[0] != '[' {
+		return nil
+	}
+	var wisps []struct {
+		ID     string `json:"id"`
+		Title  string `json:"title"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &wisps); err != nil {
+		return nil
+	}
+
+	var doomed []wispaudit.Wisp
+	for _, w := range wisps {
+		if w.Status != "closed" {
+			continue
+		}
+		doomed = append(doomed, wispaudit.Wisp{ID: w.ID, Title: w.Title})
+	}
+	return doomed
+}
+
+// extractJSONArray finds the first '[' in raw output that may carry a non-JSON
+// preamble (warnings, notices), and returns from there onward.
+func extractJSONArray(data []byte) []byte {
+	start := bytes.IndexByte(data, '[')
+	if start < 0 {
+		return data
+	}
+	return data[start:]
 }
 
 // extractJSON finds the first JSON object in raw output that may contain

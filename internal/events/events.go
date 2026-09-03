@@ -56,9 +56,9 @@ const (
 	TypeMassDeath    = "mass_death"    // Multiple sessions died in short window
 
 	// Witness patrol events
-	TypePatrolStarted   = "patrol_started"
-	TypePolecatChecked  = "polecat_checked"
-	TypePolecatNudged   = "polecat_nudged"
+	TypePatrolStarted    = "patrol_started"
+	TypePolecatChecked   = "polecat_checked"
+	TypePolecatNudged    = "polecat_nudged"
 	TypeEscalationSent   = "escalation_sent"
 	TypeEscalationAcked  = "escalation_acked"
 	TypeEscalationClosed = "escalation_closed"
@@ -74,6 +74,11 @@ const (
 	// dolt_ignore, so no wisp table is ever committed and there is no AS OF to
 	// read back (hq-6ewp). The audit record is the only surviving trace, so it
 	// is written BEFORE the delete, not after (hq-g3zx).
+	//
+	// One type covers every wisp-deleting path — the purge, compaction, the
+	// reaper, the pre-push GC — so that "what happened to this wisp" is one
+	// grep of one file rather than a hunt across several logs. The payload's
+	// "path" field says which deleter acted. See internal/wispaudit.
 	TypeWispPurge = "wisp_purge"
 
 	// Scheduler events
@@ -147,8 +152,14 @@ func write(event Event) error {
 // writeStrict is write without the no-workspace exemption: it reports
 // ErrNoWorkspace instead of pretending the event was recorded.
 func writeStrict(event Event) error {
-	// Find town root
-	townRoot, err := workspace.FindFromCwd()
+	// Find town root. FindFromCwdOrError, not FindFromCwd: it falls back to
+	// GT_TOWN_ROOT/GT_ROOT, which is the difference between recording and
+	// refusing for the two callers that most need to record — the daemon,
+	// whose cwd need not be inside the town, and gt done, whose worktree can
+	// already be gone by the time it writes. A caller that treats the record
+	// as a precondition (LogAuditDurable) is blocked by a lookup failure, so
+	// the lookup has to be the widest correct one.
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil || townRoot == "" {
 		return ErrNoWorkspace
 	}
@@ -224,15 +235,20 @@ func DonePayload(beadID, branch string) map[string]interface{} {
 
 // WispPurgePayload creates a payload for wisp purge events. phase is "planned"
 // (written before any delete, and the record that survives a mid-purge crash)
-// or "completed". ids names every wisp in the set, because after the delete
-// there is nothing left to name them.
-func WispPurgePayload(phase, scope, db string, ids []string, extra map[string]interface{}) map[string]interface{} {
+// or "completed". path names which deleter acted. wisps names every wisp in the
+// set, id and title both, because after the delete there is nothing left to name
+// them and an id alone identifies a row that no longer exists anywhere.
+//
+// Callers go through internal/wispaudit rather than here, so that every
+// wisp-deleting path in the tree produces the same record (hq-6ewp).
+func WispPurgePayload(phase, path, scope, db string, wisps []interface{}, extra map[string]interface{}) map[string]interface{} {
 	p := map[string]interface{}{
 		"phase": phase,
+		"path":  path,
 		"scope": scope,
 		"db":    db,
-		"count": len(ids),
-		"ids":   ids,
+		"count": len(wisps),
+		"wisps": wisps,
 	}
 	for k, v := range extra {
 		p[k] = v

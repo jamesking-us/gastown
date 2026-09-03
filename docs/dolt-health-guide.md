@@ -72,6 +72,63 @@ mismatch.
 - **Smallest fix direction**: the least invasive code, docs, or operations change
   that would prevent repeat incidents.
 
+## Wisps Have No Dolt History — Read the Deletion Log Instead
+
+Do not reach for `AS OF` when investigating a missing wisp. It will not work,
+and the reason is not a bug you can wait out.
+
+The whole wisps table family — `wisps`, `wisp_comments`, `wisp_labels`,
+`wisp_events`, `wisp_dependencies`, `wisp_child_counters` — is in `dolt_ignore`.
+No wisp table is ever committed, so:
+
+```sql
+SELECT count(*) FROM wisps AS OF 'HEAD';   -- Error 1146: table not found
+SELECT count(*) FROM issues AS OF 'HEAD';  -- works: AS OF is not broken
+```
+
+There is no undo, no snapshot, and no `dolt_log` entry behind any wisp deletion.
+`compaction_snapshots` and `issue_snapshots` hold no wisp rows; `wisp_events`
+cannot record a deletion because a deleted wisp's events cascade away with it,
+so its silence is not evidence. This was checked, not assumed (hq-6ewp), and it
+is why the 1449 closed hq wisps destroyed on 2026-09-01 were never recovered.
+
+The ignore is deliberate and is staying: wisp mutation volume exceeds the town
+database's entire commit volume, so un-ignoring the family would multiply Dolt
+commit traffic several-fold against a store that has already needed its history
+flattened. The record lives beside the ignore instead.
+
+**So the deletion log is the evidence.** Every path that deletes a wisp — the
+`gt done` molecule purge, `gt polecat nuke`, `gt compact`'s TTL delete,
+`gt dolt sync --gc`, `gt maintain`, the reaper purge (daemon patrol and
+`gt reaper purge`), and `gt patrol`'s digest cleanup — writes to
+`<town>/.events.jsonl` **before** deleting, and does not delete at all if the
+record cannot be written.
+
+```bash
+# What happened to a particular wisp:
+grep hq-wisp-b8pbe ~/gt/.events.jsonl | jq .
+
+# Everything a deleter removed, most recent first:
+jq -c 'select(.type=="wisp_purge")
+       | {ts, actor, path: .payload.path, phase: .payload.phase,
+          db: .payload.db, count: .payload.count}' ~/gt/.events.jsonl | tail -20
+
+# Names and titles of what one record removed:
+jq -r 'select(.type=="wisp_purge" and .payload.phase=="planned")
+       | .payload.wisps[] | "\(.id)\t\(.title // "")"' ~/gt/.events.jsonl
+```
+
+Records come in pairs. `phase: "planned"` is written before the delete and is
+the one that survives a crash mid-purge; `phase: "completed"` says what actually
+went. `path` names which deleter acted — the question a wisp-loss investigation
+has to answer first, and the one that previously could only be answered by
+reading source code. `predicted: true` marks the paths that go through
+`bd purge`, which reports a count and never the ids, so their set is enumerated
+beforehand rather than observed.
+
+Adding a new wisp deleter without a record is a CI failure, not a review catch:
+`scripts/guards/wisp-deletion-record-guard.sh`.
+
 ## Simulated Incident Smoke Check
 
 For documentation-only RCA work, use this smoke check to verify the checklist is

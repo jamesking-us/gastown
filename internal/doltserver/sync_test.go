@@ -138,6 +138,16 @@ func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
 	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
 
 	townRoot := t.TempDir()
+	// A real workspace, and the working directory: the purge records what it
+	// is about to remove before removing it, and refuses to run when there is
+	// nowhere durable to record it (hq-6ewp).
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(townRoot)
 	beadsDir := filepath.Join(townRoot, "gastown", ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -188,7 +198,7 @@ exit 2
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 	t.Setenv("BEADS_DOLT_PORT", "9999")
 
-	purged, err := PurgeClosedEphemerals(townRoot, "gastown", false)
+	purged, err := PurgeClosedEphemerals(townRoot, "gastown", "gt dolt sync --gc: pre-push purge", false)
 	if err != nil {
 		t.Fatalf("PurgeClosedEphemerals: %v", err)
 	}

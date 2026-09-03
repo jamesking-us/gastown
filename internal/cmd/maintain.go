@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -176,7 +177,7 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Reaping closed wisps...\n", style.Bold.Render("●"))
 	totalReaped := 0
 	for _, db := range dbInfos {
-		purged, err := doltserver.PurgeClosedEphemerals(townRoot, db.name, false)
+		purged, err := doltserver.PurgeClosedEphemerals(townRoot, db.name, wispaudit.PathMaintain, false)
 		if err != nil {
 			fmt.Printf("  %s %s: reap failed: %v\n", style.Warning.Render("!"), db.name, err)
 		} else if purged > 0 {

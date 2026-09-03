@@ -170,12 +170,12 @@ func readEventTypes(t *testing.T, path string) []events.Event {
 }
 
 const fixtureWispJSON = `[
-  {"id":"cl-wisp-root","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-step1","parent":"cl-wisp-root","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-step2","parent":"cl-wisp-root","status":"open","ephemeral":true},
-  {"id":"cl-wisp-kept","parent":"cl-wisp-root","status":"closed","ephemeral":true,"comment_count":2},
-  {"id":"cl-wisp-other","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-other-step","parent":"cl-wisp-other","status":"closed","ephemeral":true}
+  {"id":"cl-wisp-root","title":"mol-polecat-work","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-step1","title":"Step 1: read the bead","parent":"cl-wisp-root","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-step2","title":"Step 2: implement","parent":"cl-wisp-root","status":"open","ephemeral":true},
+  {"id":"cl-wisp-kept","title":"Step 3: commented","parent":"cl-wisp-root","status":"closed","ephemeral":true,"comment_count":2},
+  {"id":"cl-wisp-other","title":"another agent","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-other-step","title":"another agent step","parent":"cl-wisp-other","status":"closed","ephemeral":true}
 ]`
 
 // The regression this bead exists for: a completion must delete only its own
@@ -213,6 +213,19 @@ func TestPurgeOwnClosedWispsDeletesOnlyItsOwnMolecule(t *testing.T) {
 	}
 	if recorded[0].Type != events.TypeWispPurge || recorded[0].Payload["phase"] != "planned" {
 		t.Errorf("first record = %+v, want a planned wisp_purge written before the delete", recorded[0])
+	}
+
+	// hq-6ewp: the record names each wisp's title as well as its id, and says
+	// which of the tree's several wisp deleters acted. An id on its own
+	// identifies a row that no longer exists anywhere to look it up in.
+	named := fmt.Sprint(recorded[0].Payload["wisps"])
+	for _, want := range []string{"cl-wisp-root", "mol-polecat-work", "cl-wisp-step1", "Step 1: read the bead"} {
+		if !strings.Contains(named, want) {
+			t.Errorf("wisps = %v, want %q named", named, want)
+		}
+	}
+	if got := recorded[0].Payload["path"]; got != "gt done: molecule purge" {
+		t.Errorf("path = %v, want gt done named as the deleter", got)
 	}
 }
 
