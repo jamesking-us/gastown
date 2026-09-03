@@ -158,8 +158,12 @@ func stampDeaconHeartbeatOnReport(townRoot, summary string) {
 	if summary = strings.TrimSpace(summary); summary != "" {
 		action += ": " + summary
 	}
-	if err := syncDeaconHeartbeatStores(townRoot, action); err != nil {
-		style.PrintWarning("could not stamp deacon heartbeat: %v", err)
+	res := syncDeaconHeartbeatStores(townRoot, action)
+	if err := res.Err(); err != nil {
+		// Warn per store: the agent-bead label failing is the one that makes
+		// the Deacon look dead to the Witness, and it used to fail in silence
+		// because only the file store's error ever reached here (hq-huln).
+		style.PrintWarning("deacon heartbeat incomplete (%s): %v", res.Summary(), err)
 	}
 }
 

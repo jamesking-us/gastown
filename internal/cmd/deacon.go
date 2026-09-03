@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -830,31 +831,47 @@ func runDeaconHeartbeat(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	action := ""
+	if len(args) > 0 {
+		action = strings.Join(args, " ")
+	}
+
+	return deaconHeartbeat(townRoot, action, cmd.OutOrStdout())
+}
+
+// deaconHeartbeat refreshes every Deacon heartbeat store and reports what each
+// one did. The ✓ is printed only when the stores that were supposed to write
+// did write, and the message names them.
+//
+// This command used to print "✓ Heartbeat updated" off the heartbeat FILE
+// alone, while the agent-bead label — the store Witness second-order
+// monitoring reads — could be skipped by the refresh throttle or fail against
+// bd with neither outcome reaching the caller. A frozen liveness signal behind
+// a success message means either a live Deacon pages the mayor as dead, or a
+// real Deacon death goes unnoticed (hq-huln).
+func deaconHeartbeat(townRoot, action string, out io.Writer) error {
 	// Check if Deacon is paused - if so, refuse to update heartbeat
 	paused, state, err := deacon.IsPaused(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking pause state: %w", err)
 	}
 	if paused {
-		fmt.Printf("%s Deacon is paused. Use 'gt deacon resume' to unpause.\n", style.Bold.Render("⏸️"))
+		fmt.Fprintf(out, "%s Deacon is paused. Use 'gt deacon resume' to unpause.\n", style.Bold.Render("⏸️"))
 		if state.Reason != "" {
-			fmt.Printf("  Reason: %s\n", state.Reason)
+			fmt.Fprintf(out, "  Reason: %s\n", state.Reason)
 		}
 		return errors.New("Deacon is paused")
 	}
 
-	action := ""
-	if len(args) > 0 {
-		action = strings.Join(args, " ")
-	}
-
-	if err := syncDeaconHeartbeatStores(townRoot, action); err != nil {
+	res := syncDeaconHeartbeatStores(townRoot, action)
+	if err := res.Err(); err != nil {
+		fmt.Fprintf(out, "%s Heartbeat INCOMPLETE (%s)\n", style.Bold.Render("✗"), res.Summary())
 		return fmt.Errorf("updating heartbeat: %w", err)
 	}
 	if action != "" {
-		fmt.Printf("%s Heartbeat updated: %s\n", style.Bold.Render("✓"), action)
+		fmt.Fprintf(out, "%s Heartbeat updated: %s (%s)\n", style.Bold.Render("✓"), action, res.Summary())
 	} else {
-		fmt.Printf("%s Heartbeat updated\n", style.Bold.Render("✓"))
+		fmt.Fprintf(out, "%s Heartbeat updated (%s)\n", style.Bold.Render("✓"), res.Summary())
 	}
 
 	return nil

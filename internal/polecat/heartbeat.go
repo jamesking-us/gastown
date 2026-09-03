@@ -2,6 +2,7 @@ package polecat
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -74,11 +75,22 @@ func TouchSessionHeartbeat(townRoot, sessionName string) {
 
 // TouchSessionHeartbeatWithState writes a heartbeat with explicit state information.
 // Used by gt done (state="exiting") and gt heartbeat (state="stuck"). See gt-3vr5.
-// This is best-effort: errors are silently ignored.
+// This is best-effort: errors are silently ignored. Callers that PRINT a
+// success message must use TouchSessionHeartbeatWithStateErr instead — a
+// heartbeat command that reports success while writing nothing is how a live
+// agent comes to look dead (hq-huln).
 func TouchSessionHeartbeatWithState(townRoot, sessionName string, state HeartbeatState, context, bead string) {
+	_ = TouchSessionHeartbeatWithStateErr(townRoot, sessionName, state, context, bead)
+}
+
+// TouchSessionHeartbeatWithStateErr is TouchSessionHeartbeatWithState with the
+// write failure reported instead of dropped. The heartbeat file is how the
+// witness tells a live session from a dead one, so any caller whose output
+// claims the heartbeat was updated needs to know whether it actually was.
+func TouchSessionHeartbeatWithStateErr(townRoot, sessionName string, state HeartbeatState, context, bead string) error {
 	dir := heartbeatsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
+		return fmt.Errorf("creating heartbeat dir %s: %w", dir, err)
 	}
 
 	hb := SessionHeartbeat{
@@ -90,10 +102,14 @@ func TouchSessionHeartbeatWithState(townRoot, sessionName string, state Heartbea
 
 	data, err := json.Marshal(hb)
 	if err != nil {
-		return
+		return fmt.Errorf("encoding heartbeat: %w", err)
 	}
 
-	_ = os.WriteFile(heartbeatFile(townRoot, sessionName), data, 0644)
+	path := heartbeatFile(townRoot, sessionName)
+	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: heartbeat is world-readable by design
+		return fmt.Errorf("writing heartbeat %s: %w", path, err)
+	}
+	return nil
 }
 
 // ReadSessionHeartbeat reads the heartbeat for a polecat session.
