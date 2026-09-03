@@ -17,7 +17,14 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-var errNoComparisonRefs = errors.New("no comparison refs resolved")
+// ErrNoComparisonRefs reports that HEAD could not be compared against any ref:
+// no target, no custody ref, no upstream, and no remote default branch resolved.
+//
+// It means UNMEASURED, not zero. A repository with no reachable remote refs is
+// the case where every commit exists only in this checkout, so any caller that
+// renders this error as "0 unpushed commits" inverts the risk it is trying to
+// measure. Destructive callers must treat it as work-at-risk (cl-hwl).
+var ErrNoComparisonRefs = errors.New("no comparison refs resolved")
 
 // GitError contains raw output from a git command for agent observation.
 // ZFC: Callers observe the raw output and decide what to do.
@@ -1268,10 +1275,22 @@ func parsePorcelainStatusEntry(line string) (porcelainStatusEntry, bool) {
 		return porcelainStatusEntry{}, false
 	}
 
+	// Porcelain format is two status columns then a space then the path. Git
+	// command output reaches this parser space-trimmed, so a worktree-only
+	// change appearing FIRST (" M path") arrives as "M path" and a plain
+	// line[3:] silently eats the first character of the path — the reported
+	// file becomes one that does not exist. Restore the stripped index column
+	// rather than trusting the offset (cl-hwl, found while wiring uncommitted
+	// paths into a destructive verdict's blockers).
+	code, path := line[:2], line[3:]
+	if line[2] != ' ' {
+		code, path = " "+line[:1], line[2:]
+	}
+
 	entry := porcelainStatusEntry{
-		Code:     line[:2],
-		Path:     line[3:],
-		Unmerged: isUnmergedPorcelainStatus(line[:2]),
+		Code:     code,
+		Path:     path,
+		Unmerged: isUnmergedPorcelainStatus(code),
 	}
 	if strings.ContainsAny(entry.Code, "RC") {
 		entry.SourcePath, entry.Path = porcelainRenameCopyPaths(entry.Path)
@@ -2712,6 +2731,13 @@ func (g *Git) StashPop(ref string) error {
 // It prefers the exact remote branch when one exists, because polecat branches may
 // track origin/main while pushing work to origin/<current-branch>.
 // Returns 0 if there is no upstream or exact remote branch configured.
+//
+// CAUTION: that last sentence is a risk inversion for destructive callers. A
+// repository with no comparison ref is one whose commits exist nowhere but this
+// checkout, and this function reports it identically to a fully pushed branch.
+// Anything deciding whether work can be destroyed must call
+// BranchPreservationStatus directly and treat ErrNoComparisonRefs as unmeasured
+// (cl-hwl).
 func (g *Git) UnpushedCommits() (int, error) {
 	branch, branchErr := g.CurrentBranch()
 	if branchErr != nil || branch == "" || branch == "HEAD" {
@@ -2720,7 +2746,7 @@ func (g *Git) UnpushedCommits() (int, error) {
 
 	status, err := g.BranchPreservationStatus(branch, "origin", nil)
 	if err != nil {
-		if errors.Is(err, errNoComparisonRefs) {
+		if errors.Is(err, ErrNoComparisonRefs) {
 			return 0, nil
 		}
 		return 0, err
@@ -2827,7 +2853,7 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 		if hasEvidence {
 			return result, fmt.Errorf("no target/custody refs resolved")
 		}
-		return result, errNoComparisonRefs
+		return result, ErrNoComparisonRefs
 	}
 
 	var lastErr error

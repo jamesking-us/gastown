@@ -119,6 +119,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			if gitErr != nil {
 				result.Reasons = append(result.Reasons, "cannot check git state")
 			} else if !gitState.Clean {
+				for _, u := range gitState.Unmeasured {
+					result.Reasons = append(result.Reasons, "cannot check git state: "+u)
+				}
 				if gitState.UnpushedCommits > 0 {
 					result.Reasons = append(result.Reasons, fmt.Sprintf("has %d unpushed commit(s)", gitState.UnpushedCommits))
 				} else if len(gitState.UncommittedFiles) > 0 {
@@ -278,9 +281,12 @@ func displayDryRunSafetyCheck(target polecatTarget) bool {
 			if gitErr != nil {
 				fmt.Printf("    - Git state: %s\n", style.Warning.Render("cannot check"))
 			} else if gitState.Clean {
-				fmt.Printf("    - Git state: %s\n", style.Success.Render("clean"))
+				fmt.Printf("    - Git state: %s %s\n", style.Success.Render("clean"), style.Dim.Render(gitStateScopeSentence(gitState)))
 			} else {
 				fmt.Printf("    - Git state: %s\n", style.Error.Render("dirty"))
+				for _, u := range gitState.Unmeasured {
+					fmt.Printf("      - %s\n", style.Error.Render("unmeasured checkout: "+u))
+				}
 			}
 		} else {
 			fmt.Printf("    - Git state: %s\n", style.Dim.Render("unknown (no polecat info)"))

@@ -3820,3 +3820,72 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
+
+// TestParsePorcelainStatusEntryTrimmedLeadingColumn pins the recovery of the
+// index column that command-output trimming removes. A worktree-only change
+// listed first arrives as "M path" instead of " M path", and reading the path
+// at a fixed offset reports a file that does not exist — in a destructive
+// verdict's blocker list, that is a confident wrong answer (cl-hwl).
+func TestParsePorcelainStatusEntryTrimmedLeadingColumn(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		wantCode string
+		wantPath string
+	}{
+		{"trimmed worktree modification", "M internal/cmd/polecat.go", " M", "internal/cmd/polecat.go"},
+		{"intact worktree modification", " M internal/cmd/polecat.go", " M", "internal/cmd/polecat.go"},
+		{"trimmed worktree deletion", "D internal/gone.go", " D", "internal/gone.go"},
+		{"untracked", "?? internal/new.go", "??", "internal/new.go"},
+		{"staged and modified", "MM internal/both.go", "MM", "internal/both.go"},
+		{"staged add", "A  internal/added.go", "A ", "internal/added.go"},
+		{"unmerged", "UU internal/conflict.go", "UU", "internal/conflict.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, ok := parsePorcelainStatusEntry(tt.line)
+			if !ok {
+				t.Fatalf("parsePorcelainStatusEntry(%q) returned not-ok", tt.line)
+			}
+			if entry.Code != tt.wantCode {
+				t.Errorf("code = %q, want %q", entry.Code, tt.wantCode)
+			}
+			if entry.Path != tt.wantPath {
+				t.Errorf("path = %q, want %q", entry.Path, tt.wantPath)
+			}
+		})
+	}
+}
+
+// TestStatusReportsFirstModifiedPathIntact is the end-to-end form: the first
+// modified file in a real repository must be named correctly.
+func TestStatusReportsFirstModifiedPathIntact(t *testing.T) {
+	dir := t.TempDir()
+	runTestGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runTestGit("init")
+	runTestGit("config", "user.email", "test@example.com")
+	runTestGit("config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(dir, "internal.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit("add", "internal.go")
+	runTestGit("commit", "-m", "base")
+	if err := os.WriteFile(filepath.Join(dir, "internal.go"), []byte("package main // edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := NewGit(dir).Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Modified) != 1 || status.Modified[0] != "internal.go" {
+		t.Fatalf("modified = %v, want [internal.go]", status.Modified)
+	}
+}
