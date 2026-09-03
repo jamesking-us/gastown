@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testsink"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -930,15 +931,10 @@ func wakeRigAgents(rigName string) {
 func nudgeWitness(rigName, message string) {
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
 
-	// Test hook: log nudge for test observability
-	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		entry := fmt.Sprintf("nudge:%s:%s\n", witnessSession, message)
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			_, _ = f.WriteString(entry)
-			_ = f.Close()
-		}
-		return // Don't actually nudge tmux in tests
+	// Under test, record and stop: the witness session this resolves to is a
+	// live seat's pane on a Gas Town host (gt-8f3).
+	if testsink.InterceptNudge(witnessSession, "witness-wake", message) {
+		return
 	}
 
 	// Emit a file event so the witness's await-event unblocks instantly.
@@ -964,15 +960,11 @@ func nudgeWitness(rigName, message string) {
 func nudgeRefinery(rigName, message string) {
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
 
-	// Test hook: log nudge for test observability (same pattern as GT_TEST_ATTACHED_MOLECULE_LOG)
-	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		entry := fmt.Sprintf("nudge:%s:%s\n", refinerySession, message)
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			_, _ = f.WriteString(entry)
-			_ = f.Close()
-		}
-		return // Don't actually nudge tmux in tests
+	// Under test, record and stop. cl-refinery's real queue was saturated at
+	// 50/50 under an active incident while tests were pushing at it (gt-8f3,
+	// hq-d16k).
+	if testsink.InterceptNudge(refinerySession, "mr-created", message) {
+		return
 	}
 
 	// Emit a file event so the refinery's await-event unblocks instantly.

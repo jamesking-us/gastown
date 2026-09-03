@@ -3,6 +3,7 @@ package testenv
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,19 @@ func TestIsolateProcessEnv(t *testing.T) {
 	}
 	if strings.Contains(string(cfg), "credential") {
 		t.Error(".gitconfig must not carry a credential helper — tests must not authenticate as the operator")
+	}
+
+	// The nudge transport is the third escape surface in this family: HOME and
+	// the Dolt endpoint were closed by cl-69h and cl-qaj3, and neither touched
+	// tmux or the nudge queue, so the suite went on delivering to live seats
+	// (gt-8f3). Isolation has to arm the guards by default — an opt-in the
+	// individual test has to remember is what produced the escape.
+	if got := os.Getenv(IsolatedEnv); got != "1" {
+		t.Errorf("%s = %q, want \"1\"", IsolatedEnv, got)
+	}
+	sink := os.Getenv(NudgeSinkEnv)
+	if want := filepath.Join(home, NudgeSinkFile); sink != want {
+		t.Errorf("%s = %q, want %q — an isolated process needs somewhere to record the nudges it refuses", NudgeSinkEnv, sink, want)
 	}
 
 	AssertProcessEnvIsolated(t)
@@ -178,5 +192,22 @@ func TestGoToolchainEnvSurvivesIsolation(t *testing.T) {
 
 	if os.Getenv("HOME") == home {
 		t.Fatal("HOME unchanged; the rest of this test proves nothing")
+	}
+}
+
+// TestIsolateProcessEnvKeepsACallerSuppliedSink covers the tests that set their
+// own sink path and read it back. Isolation supplies a default, but it must not
+// overwrite a path someone else chose — those tests set it before TestMain runs
+// in exactly one case that matters, a subprocess launched with the variable
+// already in its environment.
+func TestIsolateProcessEnvKeepsACallerSuppliedSink(t *testing.T) {
+	chosen := filepath.Join(t.TempDir(), "chosen.log")
+	t.Setenv(NudgeSinkEnv, chosen)
+
+	cleanup := IsolateProcessEnv()
+	t.Cleanup(cleanup)
+
+	if got := os.Getenv(NudgeSinkEnv); got != chosen {
+		t.Errorf("%s = %q, want the caller's %q", NudgeSinkEnv, got, chosen)
 	}
 }

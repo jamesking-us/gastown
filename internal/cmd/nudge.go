@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testsink"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -156,17 +157,12 @@ var idleWatcherPollInterval = 1 * time.Second
 // For "queue" mode: writes to the nudge queue for cooperative delivery.
 // For "wait-idle" mode: waits for idle, then delivers or falls back to queue.
 func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
-	// Test hook: when GT_TEST_NUDGE_LOG is set, log the nudge instead of
-	// delivering through real tmux/queue transport. Prevents test-suite
-	// runs from delivering "test" messages to live agents (mayor reported
-	// recurring synthetic nudges traced to nudge_test.go invocations).
-	// Mirrors the pattern in sling_helpers.go's nudgeWitness/nudgeRefinery.
-	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		entry := fmt.Sprintf("nudge:%s:%s:%s\n", sessionName, sender, message)
-		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			_, _ = f.WriteString(entry)
-			_ = f.Close()
-		}
+	// Under test, record the delivery and stop. This used to be an opt-in read
+	// of GT_TEST_NUDGE_LOG that each test had to remember; the ones that forgot
+	// delivered "test" to hq-mayor, cl-witness, cl-refinery and the deacon for
+	// real (gt-8f3). Isolation now sets the sentinel for every isolated
+	// package, so the default is interception and no test has to opt in.
+	if testsink.InterceptNudge(sessionName, sender, message) {
 		return nil
 	}
 
@@ -303,6 +299,44 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		}
 		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
 	}
+}
+
+// recordNudge writes the two observability records a delivered nudge leaves
+// behind: the town log line and the feed event.
+//
+// Both are writes to the LIVE town, and both escaped isolation. Stripping
+// GT_TOWN_ROOT and GT_ROOT (cl-qaj3) does not stop them, because the lookup
+// they use walks up from the working directory — which, for a test, is its
+// package inside a gastown checkout that sits inside the operator's real town.
+// So a suppressed delivery still produced "[nudge] hq-mayor nudged with test"
+// in /gt/logs/town.log, and gt-8f3 asks for zero such lines. That is also how
+// the leak presented: two readers spent real effort on what looked like a nudge
+// storm against a healthy polecat and was a test writing to the shared log.
+//
+// Folding the four copies of this pair into one function is the other half of
+// the fix — a guard repeated at four call sites is a guard waiting to be
+// forgotten at a fifth.
+func recordNudge(rigName, target, sender, message string) {
+	if testsink.Active() {
+		return
+	}
+	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+		_ = LogNudge(townRoot, target, message)
+	}
+	recordNudgeFeed(rigName, target, sender, message)
+}
+
+// recordNudgeFeed records the feed event without the town-log line.
+//
+// The channel path uses it because a channel nudge has always produced one feed
+// entry and no town-log line — it is a fan-out, and the individual deliveries it
+// makes are logged by the paths it calls. This change is about where records
+// are allowed to land, not about which records exist.
+func recordNudgeFeed(rigName, target, sender, message string) {
+	if testsink.Active() {
+		return
+	}
+	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
 }
 
 // watchAndDeliver polls a session for idle state over idleWatcherTimeout.
@@ -532,11 +566,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 
 		fmt.Printf("%s Nudged deacon (%s)\n", style.Bold.Render("✓"), nudgeModeFlag)
 
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, constants.RoleDeacon, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", constants.RoleDeacon, message))
+		recordNudge("", constants.RoleDeacon, sender, message)
 		return nil
 	}
 	if dogName, ok := mail.DogAddressName(target); ok {
@@ -556,10 +586,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		fmt.Printf("%s Nudged %s (%s)\n", style.Bold.Render("✓"), target, nudgeModeFlag)
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+		recordNudge("", target, sender, message)
 		return nil
 	}
 	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, constants.RoleDeacon+"/") {
@@ -627,11 +654,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 
 		fmt.Printf("%s Nudged %s/%s (%s)\n", style.Bold.Render("✓"), rigName, polecatName, nudgeModeFlag)
 
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
+		recordNudge(rigName, target, sender, message)
 	} else {
 		// Raw session name (legacy)
 		// Check for ACP session - ACP agents don't have tmux sessions but can receive nudges via queue
@@ -653,11 +676,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 
 		fmt.Printf("✓ Nudged %s (%s)\n", target, nudgeModeFlag)
 
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+		recordNudge("", target, sender, message)
 	}
 
 	return nil
@@ -750,8 +769,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 
 	fmt.Println()
 
-	// Log nudge event
-	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", "channel:"+channelName, message))
+	recordNudgeFeed("", "channel:"+channelName, sender, message)
 
 	if failed > 0 {
 		summary := fmt.Sprintf("Channel nudge complete: %d succeeded, %d failed", succeeded, failed)

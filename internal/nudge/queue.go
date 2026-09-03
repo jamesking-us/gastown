@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/testsink"
 )
 
 // Priority levels for nudge delivery.
@@ -90,6 +91,21 @@ func randomSuffix() string {
 // The nudge will be picked up by the agent's hook at the next turn boundary.
 // Returns an error if the queue is full (MaxQueueDepth reached).
 func Enqueue(townRoot, session string, nudge QueuedNudge) error {
+	// A queued nudge is delivered later, by the target agent's own hook, which
+	// makes the queue a delivery transport with a delay rather than a scratch
+	// file — and gt-8f3 requires a test run to add zero entries to the live
+	// town's queue. Writing into a town the test does not own is refused here
+	// and recorded to the sink instead.
+	//
+	// The check is on the destination, not on being under test: internal/nudge's
+	// own tests enqueue into a t.TempDir town and read the files back, and have
+	// to keep working, or this guard would have stopped exercising the queue it
+	// is protecting.
+	if testsink.BlocksTownWrite(townRoot) {
+		testsink.RecordNudge(session, nudge.Sender, nudge.Message)
+		return nil
+	}
+
 	dir := queueDir(townRoot, session)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating nudge queue dir: %w", err)
