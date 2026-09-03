@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/worktreewrite"
 )
 
 // HungSessionThresholdMinutes is the number of minutes of tmux inactivity
@@ -2237,6 +2238,32 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 // nukes them before they finish starting up. See GH#2036.
 const SpawnGracePeriod = 5 * time.Minute
 
+// WorktreeWriteWorkingWindow is how recently a polecat's worktree must have
+// been written for the witness to treat the polecat as demonstrably working and
+// skip stall detection entirely.
+//
+// Sized against the action it guards. The action is blind keystrokes into a
+// live pane, whose cost when wrong is an interrupted turn and, where staged
+// text is sitting in the input box, a command nobody decided to run. Against
+// that, the cost of skipping a genuine stall for a few extra minutes is one
+// more patrol tick. The window is generous on purpose.
+const WorktreeWriteWorkingWindow = 5 * time.Minute
+
+// worktreeShowsRecentWork reports whether a file was written under clonePath
+// within window.
+//
+// It is a separate function so that the suppressor's decision can be tested
+// without a tmux server, and so that its ONE DIRECTION is visible at the call
+// site: this returns true to SKIP detection and never returns anything that
+// causes a detection. A false result means only "this instrument saw nothing",
+// which is the reading cl-2sp exists to stop anyone acting on.
+func worktreeShowsRecentWork(clonePath string, window time.Duration) bool {
+	if clonePath == "" {
+		return false
+	}
+	return worktreewrite.Scan(clonePath, worktreewrite.Options{}).ProvesRecentWork(window)
+}
+
 // StalledResult represents a single stalled polecat detection.
 type StalledResult struct {
 	PolecatName   string // e.g., "alpha"
@@ -2325,8 +2352,40 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 			}
 		}
 
+		// Positive-evidence suppressor (cl-2sp). A file written under this
+		// polecat's worktree in the last few minutes is proof the agent is
+		// doing something, and proof outranks the age-anchored gates below.
+		//
+		// THIS IS WHY IT MATTERS HERE SPECIFICALLY. The two gates below are
+		// session_created and session_activity, and tmux reports the SAME
+		// VALUE for both: measured across ten live sessions on 2026-09-01,
+		// session_activity equalled session_created in every one, including a
+		// session executing commands at the instant of measurement. So the
+		// activity gate can only pass when the age gate has already passed —
+		// it is degenerate, and every live session older than the stall
+		// threshold reaches the branch below, which sends BLIND KEYSTROKES
+		// into the pane. Two polecats later confirmed to have been working
+		// normally were recorded as "startup-stall -> auto-dismissed" on the
+		// strength of it.
+		//
+		// The suppressor is deliberately ONE-DIRECTIONAL. A recent write skips
+		// detection; silence changes nothing and can never cause a detection
+		// that would not have happened anyway. That asymmetry is the whole
+		// point: a quiet worktree is not evidence of a stall (an agent reading
+		// dependency source, analysing failures, or blocked on a build lock
+		// writes nothing for as long as that lasts), so it must never be
+		// allowed to arm an action.
+		clonePath := polecat.ResolveClonePath(filepath.Join(townRoot, rigName), rigName, polecatName)
+		if worktreeShowsRecentWork(clonePath, WorktreeWriteWorkingWindow) {
+			continue
+		}
+
 		// Legacy: Use structured signals to detect startup stalls:
 		// session_created (age) + session_activity (last output).
+		//
+		// Both gates below read age, not activity (cl-2sp). They are kept
+		// because they bound how early detection can fire, not because either
+		// reports whether the agent is doing anything.
 		createdUnix, err := t.GetSessionCreatedUnix(sessionName)
 		if err != nil {
 			result.Errors = append(result.Errors,

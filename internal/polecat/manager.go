@@ -495,17 +495,32 @@ func (m *Manager) pendingPath(name string) string {
 }
 
 // clonePath returns the path where the git worktree lives.
+func (m *Manager) clonePath(name string) string {
+	return ResolveClonePath(m.rig.Path, m.rig.Name, name)
+}
+
+// ResolveClonePath returns the path where a polecat's git worktree lives,
+// without needing a Manager.
+//
 // New structure: polecats/<name>/<rigname>/ - gives LLMs recognizable repo context.
 // Falls back to old structure: polecats/<name>/ for backward compatibility.
-func (m *Manager) clonePath(name string) string {
+//
+// Exported and separated from Manager because callers OUTSIDE this package now
+// need the worktree path — the witness measures worktree writes as its liveness
+// signal (cl-2sp) — and a second hand-rolled copy of this two-layout rule would
+// silently resolve old-structure polecats to a directory that does not exist.
+// A scan of a path that is not there returns "no writes", which reads exactly
+// like a quiet agent. Measuring the wrong object is the failure this whole bead
+// is about; one function, one layout rule.
+func ResolveClonePath(rigPath, rigName, name string) string {
 	// New structure: polecats/<name>/<rigname>/
-	newPath := filepath.Join(m.rig.Path, "polecats", name, m.rig.Name)
+	newPath := filepath.Join(rigPath, "polecats", name, rigName)
 	if info, err := os.Stat(newPath); err == nil && info.IsDir() {
 		return newPath
 	}
 
 	// Old structure: polecats/<name>/ (backward compat)
-	oldPath := filepath.Join(m.rig.Path, "polecats", name)
+	oldPath := filepath.Join(rigPath, "polecats", name)
 	if info, err := os.Stat(oldPath); err == nil && info.IsDir() {
 		// Check if this is actually a git worktree (has .git file or dir)
 		gitPath := filepath.Join(oldPath, ".git")
