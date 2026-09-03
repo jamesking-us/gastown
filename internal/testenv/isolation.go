@@ -58,6 +58,64 @@ var TownRootVars = []string{"GT_TOWN_ROOT", "GT_ROOT"}
 // need it.
 const AllowRealDoltEnv = "GT_TEST_ALLOW_REAL_DOLT"
 
+// IsolatedEnv marks the process as a test process for the code under test.
+// It is the environment half of internal/testsink; that package reads it to
+// decide whether a nudge may reach a real tmux pane or a real nudge queue.
+//
+// It is a separate variable from the sink path below because a test is allowed
+// to clear the sink and exercise the un-sunk delivery path, and must still be
+// unable to reach a live seat while doing so (gt-8f3).
+//
+// Kept as a literal rather than an import of internal/testsink so this package
+// stays dependency-free; TestSentinelNamesMatchTestsink pins the two together.
+const IsolatedEnv = "GT_TEST_ISOLATED"
+
+// NudgeSinkEnv names the file that intercepted nudges are appended to.
+//
+// The variable predates the isolation layer as a per-test opt-in that
+// individual tests set with t.Setenv. Opt-in is why gt-8f3 happened: the tests
+// that remembered it were sunk and the ones that did not delivered to live
+// agents, and nothing made the difference visible. IsolateProcessEnv now
+// points it at a file in the private HOME by default, so a package that has
+// never heard of the variable is covered too; a test that sets its own path
+// with t.Setenv still wins, because that happens after TestMain.
+const NudgeSinkEnv = "GT_TEST_NUDGE_LOG"
+
+// NudgeSinkFile is the sink's name inside the isolated HOME.
+const NudgeSinkFile = "nudge-sink.log"
+
+// TmuxSocketsEnv lists the tmux sockets the test process owns. AllowTmuxSocket
+// appends to it; the transport guard in internal/tmux reads it.
+const TmuxSocketsEnv = "GT_TEST_TMUX_SOCKETS"
+
+// TownSocketVar points gt at the tmux server the town's agents live on. Like
+// the town-root pointers below it is inherited by every agent session, and left
+// set it hands an isolated test process the panes of live seats.
+const TownSocketVar = "GT_TOWN_SOCKET"
+
+// AllowTmuxSocket declares a tmux socket this test process created, so nudges
+// to it are delivered rather than intercepted.
+//
+// Call it from the TestMain (or helper) that starts the server, next to
+// tmux.SetDefaultSocket. Only the package that owns a server should call it:
+// the guard it relaxes is the one keeping a test nudge off hq-mayor's pane.
+func AllowTmuxSocket(socket string) {
+	if socket == "" {
+		return
+	}
+	existing := os.Getenv(TmuxSocketsEnv)
+	if existing == "" {
+		setEnv(TmuxSocketsEnv, socket)
+		return
+	}
+	for _, allowed := range strings.Split(existing, ",") {
+		if allowed == socket {
+			return
+		}
+	}
+	setEnv(TmuxSocketsEnv, existing+","+socket)
+}
+
 // isolationApplied records whether IsolateProcessEnv has run in this process,
 // so AssertProcessEnvIsolated can tell "isolated" from "never set up". A plain
 // HOME comparison cannot: with no TestMain at all, HOME is simply the real one
@@ -144,6 +202,25 @@ func IsolateProcessEnv() func() {
 		// Nothing may spawn a server to satisfy the unreachable endpoint.
 		setEnv("BEADS_DOLT_AUTO_START", "0")
 	}
+
+	// Isolate the nudge transport. Without this a test that delivers a nudge
+	// reaches the live town's tmux panes and nudge queue: cl-69h and cl-qaj3
+	// closed HOME and the Dolt endpoint, but the nudge transport resolves seats
+	// through tmux and through a town root found by walking UP from the working
+	// directory, so neither of those two fixes touched it (gt-8f3).
+	setEnv(IsolatedEnv, "1")
+	if os.Getenv(NudgeSinkEnv) == "" {
+		setEnv(NudgeSinkEnv, filepath.Join(home, NudgeSinkFile))
+	}
+
+	// Strip the inherited town socket and the inherited list of test-owned
+	// sockets. GT_TOWN_SOCKET names the tmux server the live town's agents run
+	// on; a test process that keeps it has NewTmux() pointed straight at their
+	// panes. The socket list is cleared for the same reason the endpoint is
+	// re-pointed rather than unset: a value inherited from an outer test run
+	// would silently re-permit delivery here.
+	unsetEnv(TownSocketVar)
+	unsetEnv(TmuxSocketsEnv)
 
 	isolationApplied = true
 	return func() { _ = os.RemoveAll(home) }
@@ -372,6 +449,10 @@ func assertHomeAndActorIsolated(t *testing.T) {
 	}
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		t.Fatalf("isolated HOME %q is not a usable directory: %v", home, err)
+	}
+
+	if got := os.Getenv(IsolatedEnv); got != "1" {
+		t.Errorf("%s = %q, want \"1\" — the transport guards that keep a test nudge off a live pane key on this sentinel (gt-8f3)", IsolatedEnv, got)
 	}
 
 	if got := os.Getenv("BD_ACTOR"); got != "" {

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testsink"
 )
 
 // sessionNudgeLocks serializes nudges to the same session.
@@ -1775,6 +1776,24 @@ func isTmuxIndex(value string) bool {
 // NudgeSessionWithOpts is like NudgeSession but accepts delivery options.
 // See NudgeOpts for available options.
 func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) error {
+	// The last line of defence for gt-8f3. Callers are expected to intercept
+	// earlier — cmd.deliverNudge does, and gets to record the sender — but this
+	// is the single funnel every tmux nudge in the codebase passes through, so
+	// guarding it is what makes "a test nudge cannot reach a live pane" a
+	// property of the transport rather than a property of each caller having
+	// remembered. The escape it closes is real: the session names a test
+	// resolves ("hq-mayor", "cl-refinery") are the live town's sessions, and
+	// send-keys into a pane holding staged text submits that text (cl-jkr).
+	//
+	// A socket the test process created itself is exempt — see
+	// testsink.EnvTmuxSockets. This package's own delivery tests run there, and
+	// they have to keep running: an isolation that stopped exercising the nudge
+	// path would pass gt-8f3's "nothing escaped" check by having nothing left
+	// to escape.
+	if testsink.InterceptTmuxNudge(t.socketName, session, message) {
+		return nil
+	}
+
 	// Cross-process lock: serialize nudges across OS processes via flock(2).
 	// Each `gt nudge` CLI invocation is a separate process, so the in-process
 	// channel semaphore below provides no cross-process protection. Without

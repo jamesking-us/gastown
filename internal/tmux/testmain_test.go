@@ -29,6 +29,13 @@ func TestMain(m *testing.M) {
 	// user's personal server or the sentinel that indicates "no town context".
 	SetDefaultSocket(socket)
 
+	// Declare the server as this process's own, so the nudge guard delivers to
+	// it. Every tmux instance in this package's tests targets either this
+	// socket or one the test creates for itself; nothing here talks to the
+	// town's server, which is what the guard exists to keep tests away from
+	// (gt-8f3).
+	testenv.AllowTmuxSocket(socket)
+
 	// Start a sentinel session to keep the server alive for the entire test run.
 	// Without this, tests that kill their last session inadvertently take down
 	// the server, leaving a stale socket that prevents subsequent new-session
