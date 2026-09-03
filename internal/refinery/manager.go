@@ -798,6 +798,23 @@ type PostMergeResult struct {
 	SourceIssueClosed   bool
 	SourceIssueID       string
 	SourceIssueNotFound bool // true if source issue doesn't exist (already closed or invalid)
+
+	// SourceIssueBlocked is set when the source issue was deliberately left open
+	// because this MR does not represent all of its work; SourceIssueBlockReason
+	// says which signal blocked it.
+	SourceIssueBlocked     bool
+	SourceIssueBlockReason string
+
+	// SourceIssueSkipped is set when the caller asked for the close to be skipped.
+	SourceIssueSkipped bool
+}
+
+// PostMergeOptions tunes what post-merge cleanup is allowed to close.
+type PostMergeOptions struct {
+	// SkipSourceIssueClose leaves the source issue open. Use it when the merged
+	// MR is only part of the bead's work — an MR and its source issue are not
+	// always 1:1.
+	SkipSourceIssueClose bool
 }
 
 // PostMerge performs post-merge cleanup for a successfully merged MR.
@@ -809,20 +826,20 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return m.postMergeMR(b, mr)
+	return m.postMergeMR(b, mr, PostMergeOptions{})
 }
 
 // PostMergeMR performs post-merge cleanup for an MR snapshot that the caller has
 // already verified. This keeps proof and side effects on the same MR metadata.
-func (m *Manager) PostMergeMR(mr *MergeRequest) (*PostMergeResult, error) {
+func (m *Manager) PostMergeMR(mr *MergeRequest, opts PostMergeOptions) (*PostMergeResult, error) {
 	if mr == nil {
 		return nil, ErrMRNotFound
 	}
 	b := beads.New(m.rig.BeadsPath())
-	return m.postMergeMR(b, mr)
+	return m.postMergeMR(b, mr, opts)
 }
 
-func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResult, error) {
+func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest, opts PostMergeOptions) (*PostMergeResult, error) {
 	workBeadID := resolveMergedWorkBead(b.ForAgentBead(), mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Branch:      mr.Branch,
@@ -869,6 +886,15 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResul
 		return result, fmt.Errorf("closing MR bead: MR %s status is not open or terminal", mr.ID)
 	}
 
+	// An MR and its source issue are not always 1:1: a bead can be split across
+	// several MRs, and closing it on the first one to land reports work as done
+	// that nobody did. Honour an explicit skip before touching the bead.
+	if opts.SkipSourceIssueClose {
+		result.SourceIssueSkipped = true
+		_, _ = fmt.Fprintf(m.output, "  %s Source issue left open by request: %s\n", style.Dim.Render("—"), workBeadID)
+		return result, nil
+	}
+
 	// Close the source issue with reason and --force to bypass dependency checks.
 	// The source issue may have an attached molecule whose open steps would
 	// block a normal close. Resolve before MR close clears active_mr, then close
@@ -882,6 +908,8 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResul
 	result.SourceIssueID = sourceResult.WorkBeadID
 	result.SourceIssueClosed = sourceResult.Closed
 	result.SourceIssueNotFound = sourceResult.NotFound
+	result.SourceIssueBlocked = sourceResult.Blocked
+	result.SourceIssueBlockReason = sourceResult.BlockReason
 
 	return result, nil
 }

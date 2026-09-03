@@ -10,6 +10,8 @@ import (
 
 type fakeWorkBeadStore struct {
 	issues          map[string]*beads.Issue
+	children        map[string][]*beads.Issue
+	childrenErr     error
 	closeCalls      []string
 	lastCloseReason string
 	closeErr        error
@@ -17,7 +19,19 @@ type fakeWorkBeadStore struct {
 }
 
 func newFakeWorkBeadStore() *fakeWorkBeadStore {
-	return &fakeWorkBeadStore{issues: map[string]*beads.Issue{}}
+	return &fakeWorkBeadStore{issues: map[string]*beads.Issue{}, children: map[string][]*beads.Issue{}}
+}
+
+func (f *fakeWorkBeadStore) addChild(parent string, child *beads.Issue) {
+	f.issues[child.ID] = child
+	f.children[parent] = append(f.children[parent], child)
+}
+
+func (f *fakeWorkBeadStore) Children(id string) ([]*beads.Issue, error) {
+	if f.childrenErr != nil {
+		return nil, f.childrenErr
+	}
+	return f.children[id], nil
 }
 
 func (f *fakeWorkBeadStore) add(issue *beads.Issue) {
@@ -265,5 +279,108 @@ func TestManagerIssueToMRIncludesAgentBead(t *testing.T) {
 	mr := mgr.issueToMR(issue)
 	if mr.AgentBead != "gt-agent" {
 		t.Fatalf("AgentBead = %q, want gt-agent", mr.AgentBead)
+	}
+}
+
+// cl-ivk: an MR and its source issue are not 1:1. When a bead's work is split,
+// merging one MR must not close the whole bead — the false close is silent and
+// the remaining facets are simply lost.
+func TestCloseMergedWorkBead_RefusesBeadWithOpenChild(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-split", string(beads.StatusOpen)))
+	work.addChild("gt-split", workIssue("gt-part-1", string(beads.StatusClosed)))
+	work.addChild("gt-split", workIssue("gt-part-2", string(beads.StatusOpen)))
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{
+		MRID:        "gt-mr",
+		Target:      "main",
+		SourceIssue: "gt-split",
+		MergeCommit: "abc123",
+	})
+
+	if result.Closed {
+		t.Fatal("closed a bead whose work is only partly merged")
+	}
+	if !result.Blocked || !strings.Contains(result.BlockReason, "gt-part-2") {
+		t.Fatalf("result = %+v, want a block naming the open child", result)
+	}
+	if len(work.closeCalls) != 0 {
+		t.Fatalf("close attempted: %v", work.closeCalls)
+	}
+}
+
+func TestCloseMergedWorkBead_ClosedChildrenDoNotBlock(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-whole", string(beads.StatusOpen)))
+	work.addChild("gt-whole", workIssue("gt-part-1", string(beads.StatusClosed)))
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{
+		MRID:        "gt-mr",
+		Target:      "main",
+		SourceIssue: "gt-whole",
+		MergeCommit: "abc123",
+	})
+
+	if !result.Closed || result.Blocked {
+		t.Fatalf("result = %+v, want a normal close when every child is done", result)
+	}
+}
+
+// Molecule steps and other wisps hang off work beads as a matter of course.
+// They are not the bead's remaining work and must not block its close.
+func TestCloseMergedWorkBead_WispChildrenDoNotBlock(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-whole", string(beads.StatusOpen)))
+	work.addChild("gt-whole", workIssue("gt-wisp-step1", string(beads.StatusOpen)))
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{
+		MRID:        "gt-mr",
+		Target:      "main",
+		SourceIssue: "gt-whole",
+		MergeCommit: "abc123",
+	})
+
+	if !result.Closed || result.Blocked {
+		t.Fatalf("result = %+v, want wisp children ignored", result)
+	}
+}
+
+func TestCloseMergedWorkBead_DeclaredSplitBlocksClose(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	issue := workIssue("gt-declared", string(beads.StatusOpen))
+	issue.Description = "split: true\nsomething else\n"
+	work.add(issue)
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{
+		MRID:        "gt-mr",
+		Target:      "main",
+		SourceIssue: "gt-declared",
+		MergeCommit: "abc123",
+	})
+
+	if result.Closed || !result.Blocked || result.BlockReason != "split-declared" {
+		t.Fatalf("result = %+v, want the declared split to block the close", result)
+	}
+}
+
+// An unanswerable question is not a pass: if the children cannot be read, the
+// bead is left open and said so, rather than closed on an assumption.
+func TestCloseMergedWorkBead_UnreadableChildrenBlockClose(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-unknown", string(beads.StatusOpen)))
+	work.childrenErr = errors.New("dolt unreachable")
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{
+		MRID:        "gt-mr",
+		Target:      "main",
+		SourceIssue: "gt-unknown",
+		MergeCommit: "abc123",
+	})
+
+	if result.Closed {
+		t.Fatal("closed a bead whose children could not be read")
+	}
+	if !result.Blocked || !strings.Contains(result.BlockReason, "inconclusive") {
+		t.Fatalf("result = %+v, want an inconclusive block", result)
 	}
 }
