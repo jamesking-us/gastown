@@ -32,6 +32,17 @@ import (
 // through a dependency is not covered here — that is a real gap, and a narrower
 // one than the gap of having no watch at all.
 //
+// That gap is now closed by TestEveryTownRootReacherIsolatesItsTests, which
+// judges LINKAGE and subsumes this test: a package that calls workspace.Find*
+// necessarily imports it. The fear recorded above turned out to be wrong when
+// measured — reaching the lookup is a minority property of the repo, and the
+// transitive rule cost five TestMains (cl-az4x). This test is kept for the
+// sharper diagnosis it gives when the caller is the package's own source, and
+// because two watches over one escape surface is the correct number for a
+// family that has escaped four times. It also still scans only the top level of
+// internal/ and cmd/; the reach watch walks the tree, so nested packages are
+// covered there.
+//
 // The check reads the AST rather than the file text, so a package that only
 // DISCUSSES the lookup in a comment — internal/testsink, which documents the
 // confinement it provides and cannot import the caller without a cycle — is not
