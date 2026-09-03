@@ -1408,7 +1408,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		// When merge_strategy=pr, polecat branches have GitHub PRs that should
 		// be closed via gh pr merge (showing "merged"), not via branch deletion
 		// (which shows "closed" and destroys the PR audit trail).
-		expectedHead := strings.TrimSpace(mr.CommitSHA)
+		expectedHead := e.mergedBranchDeleteHead(mr)
 		remoteDeleteSafe := true
 		if isPolecat {
 			if e.git.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: mr.Branch, HeadSHA: expectedHead}) {
@@ -1448,6 +1448,37 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// 5. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
 	return true
+}
+
+// mergedBranchDeleteHead returns the head the branch-delete lease should be
+// taken at. The lease guards against deleting a branch that moved under the
+// merge, but keying it to the MR bead's submit-time commit_sha keys it to a
+// field that does not follow the branch: review legitimately revises a branch
+// after submit, and the delete then fails on a stale sha for a merge that
+// landed. The current tip is used instead — but only once its content is proven
+// to be on the target, so nothing unreviewed is discarded.
+func (e *Engineer) mergedBranchDeleteHead(mr *MRInfo) string {
+	submitted := strings.TrimSpace(mr.CommitSHA)
+	if e.git == nil || strings.TrimSpace(mr.Branch) == "" {
+		return submitted
+	}
+	remoteTip, err := e.git.PushRemoteBranchTip("origin", mr.Branch)
+	if err != nil || strings.TrimSpace(remoteTip) == "" || strings.TrimSpace(remoteTip) == submitted {
+		return submitted
+	}
+	remoteTip = strings.TrimSpace(remoteTip)
+
+	if err := e.git.FetchBranch("origin", mr.Branch); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: branch %s moved %s -> %s after submit but could not be fetched: %v\n", mr.Branch, shortSHA(submitted), shortSHA(remoteTip), err)
+		return submitted
+	}
+	proof, err := e.git.VerifyLandedOnPushTarget("origin", strings.TrimSpace(mr.Target), remoteTip)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: branch %s moved %s -> %s after submit and the current tip is not proven landed; leaving the branch alone: %v\n", mr.Branch, shortSHA(submitted), shortSHA(remoteTip), err)
+		return submitted
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Branch %s moved %s -> %s after submit; deleting at the current tip, proven landed by %s\n", mr.Branch, shortSHA(submitted), shortSHA(remoteTip), proof.Describe())
+	return remoteTip
 }
 
 func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
@@ -1553,9 +1584,15 @@ func (e *Engineer) verifyMRInfoPostMergeProof(mr *MRInfo) error {
 	if commit == "" {
 		return fmt.Errorf("missing submitted commit_sha")
 	}
-	if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
-		return fmt.Errorf("target %s does not contain submitted head %s: %w", target, commit, err)
+	// Ancestry alone is the wrong question after a rebase, which the merge
+	// procedure applies as a matter of course: the submitted sha is rewritten,
+	// so it is absent from the target of a merge that succeeded. The combined-
+	// diff patch-id proof covers the rebased and squashed cases.
+	proof, err := e.git.VerifyLandedOnPushTarget("origin", target, commit)
+	if err != nil {
+		return fmt.Errorf("target %s does not contain the work submitted at %s, by ancestry or by combined-diff patch-id: %w", target, commit, err)
 	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Merge proof for %s: %s\n", mr.ID, proof.Describe())
 	return nil
 }
 

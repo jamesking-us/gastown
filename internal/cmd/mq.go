@@ -167,6 +167,7 @@ Examples:
 
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
+var mqPostMergeSkipIssueClose bool
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id>",
@@ -174,10 +175,12 @@ var mqPostMergeCmd = &cobra.Command{
 	Long: `Perform post-merge cleanup after a successful merge.
 
 This command consolidates post-merge steps into a single atomic operation:
-	 1. Verify the target branch contains the submitted source head
+	 1. Prove the submitted work landed on the target branch — by ancestry, or,
+	    for a rebased or squashed merge, by combined-diff patch-id
 	 2. Close the MR bead (status: merged)
-	 3. Close the source issue
-	 4. Delete the remote polecat branch at the submitted head (unless --skip-branch-delete)
+	 3. Close the source issue, unless it is only partly represented by this MR
+	 4. Delete the remote polecat branch at its current tip, which is accepted
+	    only once proven landed (unless --skip-branch-delete)
 
 Designed for use by the refinery formula after a successful merge to main.
 The branch name is read from the MR bead, so no manual branch argument is needed.
@@ -191,11 +194,12 @@ Examples:
 
 type mqPostMergeManager interface {
 	FindMRForPostMerge(idOrBranch string) (*refinery.MergeRequest, error)
-	PostMergeMR(mr *refinery.MergeRequest) (*refinery.PostMergeResult, error)
+	PostMergeMR(mr *refinery.MergeRequest, opts refinery.PostMergeOptions) (*refinery.PostMergeResult, error)
 }
 
 type mqPostMergeGit interface {
-	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
+	VerifyLandedOnPushTarget(remote, branch, commit string) (*git.LandedProof, error)
+	FetchBranch(remote, branch string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -212,6 +216,21 @@ type mqPostMergeBranchCleanup struct {
 	AlreadyGone   bool
 	RemoteDeleted bool
 	LocalDeleted  bool
+
+	// DeletedAt is the head the delete lease was taken at. It is the submitted
+	// head unless the branch legitimately moved after submit, in which case it
+	// is the current remote tip and TipProof records why discarding it is safe.
+	DeletedAt string
+	TipMoved  bool
+	TipProof  *git.LandedProof
+}
+
+// mqPostMergeOutcome carries everything post-merge proved and did, so the
+// command can report the proof rather than just the result.
+type mqPostMergeOutcome struct {
+	Result  *refinery.PostMergeResult
+	Proof   *git.LandedProof
+	Cleanup mqPostMergeBranchCleanup
 }
 
 var mqStatusCmd = &cobra.Command{
@@ -360,6 +379,7 @@ func init() {
 
 	// Post-merge flags
 	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipBranchDelete, "skip-branch-delete", false, "Skip remote branch deletion")
+	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipIssueClose, "skip-issue-close", false, "Skip closing the source issue (use when this MR is only part of the bead's work)")
 
 	// Add subcommands
 	mqCmd.AddCommand(mqSubmitCmd)
@@ -540,22 +560,31 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete)
+	outcome, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete, mqPostMergeSkipIssueClose)
 	if err != nil {
 		return fmt.Errorf("post-merge cleanup: %w", err)
 	}
 
+	result := outcome.Result
+	branchCleanup := outcome.Cleanup
 	mr := result.MR
 	fmt.Printf("%s Post-merge: %s\n", style.Bold.Render("✓"), mr.ID)
 	fmt.Printf("  Branch: %s\n", mr.Branch)
 	fmt.Printf("  Worker: %s\n", mr.Worker)
+	fmt.Printf("  %s Merge proof: %s\n", style.Success.Render("✓"), outcome.Proof.Describe())
 
 	if result.MRClosed {
 		fmt.Printf("  %s MR closed (merged)\n", style.Success.Render("✓"))
 	}
-	if result.SourceIssueClosed {
+	switch {
+	case result.SourceIssueClosed:
 		fmt.Printf("  %s Source issue closed: %s\n", style.Success.Render("✓"), result.SourceIssueID)
-	} else if result.SourceIssueNotFound {
+	case result.SourceIssueSkipped:
+		fmt.Printf("  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(close skipped: --skip-issue-close)"))
+	case result.SourceIssueBlocked:
+		fmt.Printf("  %s Source issue NOT closed: %s (%s)\n", style.Warning.Render("!"), result.SourceIssueID, result.SourceIssueBlockReason)
+		fmt.Printf("    %s\n", style.Dim.Render("this MR does not represent the whole bead — close it by hand once the remaining work lands"))
+	case result.SourceIssueNotFound:
 		fmt.Printf("  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(already closed or not found)"))
 	}
 
@@ -570,7 +599,10 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	} else if branchCleanup.AlreadyGone {
 		fmt.Printf("  %s Remote branch already absent: %s\n", style.Dim.Render("○"), mr.Branch)
 	} else if branchCleanup.RemoteDeleted {
-		fmt.Printf("  %s Deleted remote branch: %s\n", style.Success.Render("✓"), mr.Branch)
+		fmt.Printf("  %s Deleted remote branch: %s at %s\n", style.Success.Render("✓"), mr.Branch, branchCleanup.DeletedAt)
+		if branchCleanup.TipMoved {
+			fmt.Printf("    %s\n", style.Dim.Render("tip moved after submit; deleted at the current tip, proven landed by "+branchCleanup.TipProof.Describe()))
+		}
 	}
 
 	if branchCleanup.LocalDeleted {
@@ -580,43 +612,58 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
+func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete, skipIssueClose bool) (mqPostMergeOutcome, error) {
+	outcome := mqPostMergeOutcome{}
 	mr, err := mgr.FindMRForPostMerge(mrID)
 	if err != nil {
-		return nil, mqPostMergeBranchCleanup{}, err
+		return outcome, err
 	}
-	if err := verifyMQPostMergeProof(rigGit, mr); err != nil {
-		return nil, mqPostMergeBranchCleanup{}, err
-	}
-
-	result, err := mgr.PostMergeMR(mr)
+	proof, err := verifyMQPostMergeProof(rigGit, mr)
 	if err != nil {
-		return result, mqPostMergeBranchCleanup{}, err
+		return outcome, err
+	}
+	outcome.Proof = proof
+
+	result, err := mgr.PostMergeMR(mr, refinery.PostMergeOptions{SkipSourceIssueClose: skipIssueClose})
+	outcome.Result = result
+	if err != nil {
+		return outcome, err
 	}
 
-	branchCleanup, err := cleanupMQPostMergeBranch(rigPath, rigGit, result.MR, skipBranchDelete)
-	return result, branchCleanup, err
+	outcome.Cleanup, err = cleanupMQPostMergeBranch(rigPath, rigGit, result.MR, skipBranchDelete)
+	return outcome, err
 }
 
-func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) error {
+// verifyMQPostMergeProof proves the MR landed on its target before any bead is
+// closed or any branch is deleted.
+//
+// The proof accepts a REBASED or SQUASHED merge: the refinery's documented
+// procedure rebases a branch onto the effective target before merging it, and a
+// gated MR is guaranteed to go stale, so the submitted sha is routinely absent
+// from the target of a merge that succeeded. Asking only "is the submitted sha
+// an ancestor" answers a question nobody asked and refuses the normal path;
+// the combined-diff patch-id answers the question that matters — did the
+// reviewed change land — and is invariant under both transformations.
+func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) (*git.LandedProof, error) {
 	if mr == nil {
-		return fmt.Errorf("merge proof failed: merge request is missing")
+		return nil, fmt.Errorf("merge proof failed: merge request is missing")
 	}
 	target := strings.TrimSpace(mr.TargetBranch)
 	if target == "" {
-		return fmt.Errorf("merge proof failed for MR %s: missing target branch", mr.ID)
+		return nil, fmt.Errorf("merge proof failed for MR %s: missing target branch", mr.ID)
 	}
 	if source := strings.TrimSpace(mr.Branch); source != "" && source == target {
-		return fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
+		return nil, fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
 	}
 	commit := strings.TrimSpace(mr.CommitSHA)
 	if commit == "" {
-		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
+		return nil, fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
-	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
-		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
+	proof, err := rigGit.VerifyLandedOnPushTarget("origin", target, commit)
+	if err != nil {
+		return nil, fmt.Errorf("merge proof failed for MR %s: target %s does not contain the work submitted at %s, by ancestry or by combined-diff patch-id: %w", mr.ID, target, commit, err)
 	}
-	return nil
+	return proof, nil
 }
 
 func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refinery.MergeRequest, skipBranchDelete bool) (mqPostMergeBranchCleanup, error) {
@@ -653,12 +700,20 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		if err != nil {
 			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
 		}
-		if strings.TrimSpace(remoteTip) == "" {
+		remoteTip = strings.TrimSpace(remoteTip)
+		switch {
+		case remoteTip == "":
 			cleanup.AlreadyGone = true
-		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, expectedHead); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, expectedHead, err)
-		} else {
+		default:
+			expectedHead, err = resolveMQPostMergeDeleteHead(rigGit, mr, cleanup.Branch, expectedHead, remoteTip, &cleanup)
+			if err != nil {
+				return cleanup, err
+			}
+			if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, expectedHead); err != nil {
+				return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, expectedHead, err)
+			}
 			cleanup.RemoteDeleted = true
+			cleanup.DeletedAt = expectedHead
 		}
 	}
 
@@ -666,6 +721,33 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		cleanup.LocalDeleted = true
 	}
 	return cleanup, nil
+}
+
+// resolveMQPostMergeDeleteHead decides which head the delete lease is taken at.
+//
+// The lease itself is right — it stops a delete racing a push — but keying it to
+// the MR bead's submit-time commit_sha keys it to a field that does not follow
+// the branch. A branch legitimately moves after submit whenever review asks for
+// a revision, and then the delete fails on a stale sha for a merge that landed.
+// So the lease targets the CURRENT remote tip, and the tip is only accepted once
+// its content is proven to be on the target: nothing unreviewed is discarded,
+// and nothing merged is left behind.
+func resolveMQPostMergeDeleteHead(rigGit mqPostMergeGit, mr *refinery.MergeRequest, branch, submittedHead, remoteTip string, cleanup *mqPostMergeBranchCleanup) (string, error) {
+	if remoteTip == submittedHead {
+		return submittedHead, nil
+	}
+
+	// The tip may be newer than anything fetched during the merge proof.
+	if err := rigGit.FetchBranch("origin", branch); err != nil {
+		return "", fmt.Errorf("remote branch delete %s: tip moved from %s to %s after submit and the new tip could not be fetched: %w", branch, submittedHead, remoteTip, err)
+	}
+	proof, err := rigGit.VerifyLandedOnPushTarget("origin", strings.TrimSpace(mr.TargetBranch), remoteTip)
+	if err != nil {
+		return "", fmt.Errorf("remote branch delete %s: tip moved from %s to %s after submit and the current tip is not proven landed on %s: %w", branch, submittedHead, remoteTip, mr.TargetBranch, err)
+	}
+	cleanup.TipMoved = true
+	cleanup.TipProof = proof
+	return remoteTip, nil
 }
 
 func deleteMQPostMergeLocalBranchIfAt(rigGit mqPostMergeGit, branch, expectedHead string) bool {

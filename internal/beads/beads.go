@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2298,4 +2299,68 @@ func ProvisionPrimeMDForWorktree(worktreePath string) error {
 
 	// Provision PRIME.md in the target directory
 	return ProvisionPrimeMD(beadsDir)
+}
+
+// Children returns the child issues of id.
+//
+// The plain 'bd show --json' payload carries no children, so the parent-child
+// edge has to be asked for explicitly. bd answers with an envelope keyed by the
+// parent id: {"<parent>": [ ... ], "schema_version": 1}; a bare array is also
+// accepted for older bd versions.
+func (b *Beads) Children(id string) ([]*Issue, error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.Children(id)
+		}
+	}
+
+	out, err := b.run("show", id, "--children", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd show --children: %w", err)
+	}
+	return parseChildrenEnvelope(out)
+}
+
+// parseChildrenEnvelope decodes the payload of 'bd show <id> --children --json'.
+func parseChildrenEnvelope(raw []byte) ([]*Issue, error) {
+	data := bytes.TrimSpace(raw)
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	if data[0] == '[' {
+		var issues []*Issue
+		if err := json.Unmarshal(data, &issues); err != nil {
+			return nil, fmt.Errorf("parsing children output: %w", err)
+		}
+		return issues, nil
+	}
+	if data[0] != '{' {
+		return nil, fmt.Errorf("parsing children output: unrecognized JSON shape: %.120s", string(data))
+	}
+
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return nil, fmt.Errorf("parsing children output: %w", err)
+	}
+
+	keys := make([]string, 0, len(wrapped))
+	for key := range wrapped {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var children []*Issue
+	for _, key := range keys {
+		if key == "schema_version" {
+			continue
+		}
+		var issues []*Issue
+		if err := json.Unmarshal(wrapped[key], &issues); err != nil {
+			// Envelope metadata that is not a child array; skip it.
+			continue
+		}
+		children = append(children, issues...)
+	}
+	return children, nil
 }

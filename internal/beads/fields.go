@@ -26,6 +26,7 @@ type AttachmentFields struct {
 	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local", or "" (default = mr)
 	ConvoyOwned      bool     // If true, convoy has gt:owned label (caller-managed lifecycle)
 	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
+	SplitWork        bool     // If true, the bead's work is split across several MRs — merging one must not auto-close it
 }
 
 // ParseAttachmentFields extracts attachment fields from an issue's description.
@@ -95,6 +96,9 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 		case "convoy_owned", "convoy-owned", "convoyowned":
 			fields.ConvoyOwned = strings.ToLower(value) == "true"
 			hasFields = true
+		case "split", "split_work", "split-work", "partial":
+			fields.SplitWork = strings.ToLower(value) == "true"
+			hasFields = true
 		case "formula_vars", "formula-vars", "formulavars":
 			formulaVars = append(formulaVars, splitFormulaVars(parseFormulaVars(value))...)
 			hasFields = true
@@ -155,6 +159,9 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	if fields.ConvoyOwned {
 		lines = append(lines, "convoy_owned: true")
 	}
+	if fields.SplitWork {
+		lines = append(lines, "split: true")
+	}
 	if fields.FormulaVars != "" {
 		if formatted := formatFormulaVars(fields.FormulaVars); formatted != "" {
 			lines = append(lines, "formula_vars: "+formatted)
@@ -208,6 +215,10 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 		"formula_vars":      true,
 		"formula-vars":      true,
 		"formulavars":       true,
+		"split":             true,
+		"split_work":        true,
+		"split-work":        true,
+		"partial":           true,
 	}
 
 	// Collect non-attachment lines from existing description
