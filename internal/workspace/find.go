@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/testsink"
 )
 
 // ErrNotFound indicates no workspace was found.
@@ -30,6 +31,13 @@ const (
 // Always continues to the outermost workspace, correctly handling nested
 // workspace structures (e.g., rig directories with their own mayor/town.json).
 // Does not resolve symlinks to stay consistent with os.Getwd().
+//
+// In an isolated test process the answer is confined to a town that process
+// owns (testsink.ConfineTownRoot). This walk is where the fourth escape in the
+// cl-69h family came from: a test binary runs in its own package directory,
+// which on a Gas Town host is inside the checkout, inside /gt — so the lookup
+// that was meant to report "not in a town" reported the operator's live one,
+// and every caller downstream wrote into it (cl-st8u).
 func Find(startDir string) (string, error) {
 	absDir, err := filepath.Abs(startDir)
 	if err != nil {
@@ -55,9 +63,9 @@ func Find(startDir string) (string, error) {
 		parent := filepath.Dir(current)
 		if parent == current {
 			if primaryMatch != "" {
-				return primaryMatch, nil
+				return testsink.ConfineTownRoot(primaryMatch), nil
 			}
-			return secondaryMatch, nil
+			return testsink.ConfineTownRoot(secondaryMatch), nil
 		}
 		current = parent
 	}
@@ -101,7 +109,14 @@ func FindFromCwdOrError() (string, error) {
 		if townRoot := os.Getenv(envName); townRoot != "" {
 			// Verify it's actually a workspace
 			if ok, _ := IsWorkspace(townRoot); ok {
-				return townRoot, nil
+				// Confined for the same reason the walk is: isolation strips
+				// both variables, but a test may set one itself, and pointing
+				// it at a live town must not be a way back out. A refused
+				// value falls through to the next variable, and then to
+				// ErrNotFound — "not in a town" is the safe answer.
+				if confined := testsink.ConfineTownRoot(townRoot); confined != "" {
+					return confined, nil
+				}
 			}
 		}
 	}
@@ -123,7 +138,9 @@ func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
 		if townRoot = os.Getenv("GT_TOWN_ROOT"); townRoot != "" {
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(townRoot, PrimaryMarker)); statErr == nil {
-				return townRoot, "", nil // cwd is gone but townRoot is valid
+				if townRoot = testsink.ConfineTownRoot(townRoot); townRoot != "" {
+					return townRoot, "", nil // cwd is gone but townRoot is valid
+				}
 			}
 		}
 		return "", "", fmt.Errorf("getting current directory: %w", err)

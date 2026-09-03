@@ -63,6 +63,52 @@ const EnvNudgeLog = "GT_TEST_NUDGE_LOG"
 // reached hq-mayor's pane — is refused.
 const EnvTmuxSockets = "GT_TEST_TMUX_SOCKETS"
 
+// EnvTownRoot names the fixture town an isolated test process owns.
+//
+// It is NOT GT_TOWN_ROOT. Isolation strips that variable and the assertions
+// keep it stripped, because it is the pointer every live agent session carries
+// and re-using its name would make "the operator's town" and "the test's town"
+// indistinguishable to anything reading the environment. This is a separate
+// name that only an isolated process ever has set, so production code cannot be
+// steered by it: the confinement below is reached only when EnvIsolated is "1".
+const EnvTownRoot = "GT_TEST_TOWN_ROOT"
+
+// TownRoot returns the fixture town this test process owns, or "" when none was
+// configured. A "" result is a refusal, not a fallback: the callers that
+// resolve a town root treat the empty string as "not in a town", which is the
+// safe answer when there is nowhere safe to point.
+func TownRoot() string {
+	return os.Getenv(EnvTownRoot)
+}
+
+// ConfineTownRoot returns the town root an isolated test process may use in
+// place of the one a lookup found.
+//
+// This is the cl-st8u fix, and it is deliberately at the LOOKUP rather than at
+// the write sites. gt-8f3 guarded one caller (the nudge queue) with
+// BlocksTownWrite and the family promptly produced a fourth escape through the
+// callers nobody had enumerated — the events feed, the audit log, the town log,
+// channelevents. All of them join a path onto a town root that came from
+// workspace.Find, so confining Find confines the lot, and a write site added
+// tomorrow is confined without anyone remembering to guard it.
+//
+// A town the process owns is returned unchanged: the tests that build a town
+// under t.TempDir and read it back are how the lookup stays exercised, and
+// refusing those would satisfy "no test escaped" by no longer testing the
+// lookup at all.
+//
+// Outside a test process this is the identity function, so production
+// resolution is untouched.
+func ConfineTownRoot(found string) string {
+	if !Active() || found == "" {
+		return found
+	}
+	if OwnsPath(found) {
+		return found
+	}
+	return TownRoot()
+}
+
 // Active reports whether this process is an isolated test process, and
 // therefore must not touch a live transport.
 //
@@ -177,16 +223,20 @@ func BlocksTownWrite(townRoot string) bool {
 	if !Active() || townRoot == "" {
 		return false
 	}
-	return !isTestOwned(townRoot)
+	return !OwnsPath(townRoot)
 }
 
-// isTestOwned reports whether a path lies under a directory this test process
+// OwnsPath reports whether a path lies under a directory this test process
 // owns: the OS temp directory (t.TempDir's parent) or the isolated HOME.
 //
 // Unresolvable paths count as NOT owned. The guard's job is to refuse a write
 // it cannot prove is safe, so "I could not tell" has to fall on the refusing
 // side — the failure it prevents is a nudge landing on the mayor's pane.
-func isTestOwned(path string) bool {
+//
+// Exported because ownership is the question BOTH halves of the guard ask: the
+// write sites through BlocksTownWrite, and the town-root lookup through
+// ConfineTownRoot.
+func OwnsPath(path string) bool {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return false
