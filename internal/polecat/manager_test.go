@@ -2914,3 +2914,41 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 		t.Fatal("expected error from worktree operations")
 	}
 }
+
+// TestResolveClonePath covers both worktree layouts from outside a Manager.
+// The witness resolves clone paths through this function to measure worktree
+// writes (cl-2sp); a copy of the rule that knew only the new layout would
+// resolve old-structure polecats to a directory that does not exist, and a scan
+// of a missing directory reports "no writes" — indistinguishable from a quiet
+// agent. Measuring the wrong object is the failure that bead is about.
+func TestResolveClonePath(t *testing.T) {
+	t.Run("new structure", func(t *testing.T) {
+		rigPath := t.TempDir()
+		want := filepath.Join(rigPath, "polecats", "dust", "myrig")
+		if err := os.MkdirAll(want, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if got := ResolveClonePath(rigPath, "myrig", "dust"); got != want {
+			t.Errorf("ResolveClonePath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("old structure with git", func(t *testing.T) {
+		rigPath := t.TempDir()
+		want := filepath.Join(rigPath, "polecats", "dust")
+		if err := os.MkdirAll(filepath.Join(want, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if got := ResolveClonePath(rigPath, "myrig", "dust"); got != want {
+			t.Errorf("ResolveClonePath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nonexistent defaults to new structure", func(t *testing.T) {
+		rigPath := t.TempDir()
+		want := filepath.Join(rigPath, "polecats", "ghost", "myrig")
+		if got := ResolveClonePath(rigPath, "myrig", "ghost"); got != want {
+			t.Errorf("ResolveClonePath = %q, want %q", got, want)
+		}
+	})
+}

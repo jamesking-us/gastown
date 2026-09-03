@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gt polecat activity` — a real activity signal** (cl-2sp). Surveys when each
+  polecat last wrote a file in its worktree, naming the file, quietest first. It
+  replaces the hand-rolled `find`-and-invent-a-threshold that every seat was
+  running separately, and it prints the direction rule with every result:
+  **a recent write proves work; silence proves nothing.** Also reports co-timing
+  clusters — several seats whose last writes land in the same second, which
+  means a shared cause (an outage, a lock) rather than several stalls, and which
+  no per-agent instrument can detect.
+
+### Fixed
+
+- **`last_activity` was session creation time, under a name that invited the
+  opposite reading** (cl-2sp). Measured across three live polecats created 36,
+  31 and 9 minutes apart, `last_activity` equalled `created_at` to the second in
+  all three, including one demonstrably mid-turn; tmux `session_activity`, which
+  feeds it, behaved identically across ten sessions, including one queried from
+  inside itself while executing commands. Two seats independently cited the
+  field as evidence a polecat was idle, and one of those readings reached an
+  escalation that nearly restarted an agent forty minutes into a working turn.
+  The `gt polecat status --json` key is now `tmux_session_activity`, named for
+  what it reports, and a `last_worktree_write` object carries the real signal.
+- **The Witness stall detector sent blind keystrokes into working panes**
+  (cl-2sp). Its two gates were session age and session activity, which tmux
+  reports as the same value, so the second gate could only pass when the first
+  already had — every live session past the threshold reached the
+  dismiss-dialogs branch. It now skips any polecat whose worktree was written
+  recently. The suppressor is one-directional: a write skips detection, silence
+  can never cause one.
+- **The Deacon health check's secondary liveness signal was dead code**
+  (cl-2sp). It compared tmux `session_activity` against a baseline; that value
+  never moves, so the branch could never fire, and it failed toward "did not
+  respond" — which escalates a healthy agent. It now watches for a new write
+  under the agent's sandbox, scoped to the whole sandbox rather than one
+  checkout so work in a scratch clone still counts (cl-hwl).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed

@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/worktreewrite"
 )
 
 // getDeaconSessionName returns the Deacon session name.
@@ -941,12 +942,23 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 		baselineTime = time.Now()
 	}
 
-	// Also capture baseline tmux session activity time.
-	// This is the secondary response signal: if the session shows new output
-	// after our nudge, the agent is alive and processing — even if it hasn't
-	// updated its bead (e.g., witness agents that respond in prose rather than
-	// via a structured bead-update channel).
-	baselineActivity, activityErr := t.GetSessionActivity(sessionName)
+	// Secondary response signal: did the agent WRITE anything after the nudge?
+	//
+	// This replaces tmux session_activity, which was documented here as "a
+	// reliable liveness signal" and is not one. session_activity is pinned to
+	// session creation: measured across ten live sessions on 2026-09-01 it
+	// equalled session_created in every one, including sessions executing
+	// commands at that instant (cl-2sp). A delta against a value that never
+	// moves can never fire, so this branch has been silently dead — and it
+	// fails toward "did not respond", which escalates a healthy agent.
+	//
+	// A file written under the agent's sandbox after the nudge is real
+	// evidence it processed the nudge. Absence remains evidence of nothing:
+	// an agent that answers a health check by reading, thinking, or replying
+	// in prose writes nothing, which is why this is only ever an EARLY EXIT
+	// and never a verdict. The no-response path below is unchanged.
+	sandbox := agentSandboxDir(townRoot, agent)
+	baselineWrite := scanAgentSandbox(sandbox)
 
 	fmt.Printf("%s Sent HEALTH_CHECK to %s, waiting %s...\n",
 		style.Bold.Render("→"), agent, healthCheckTimeout)
@@ -960,6 +972,7 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 	defer ticker.Stop()
 
 	responded := false
+	lastSandboxScan := time.Now()
 
 	for {
 		select {
@@ -973,13 +986,15 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 				goto Done
 			}
 
-			// Secondary signal: tmux session activity (prose/command response)
-			// Agents like the Witness respond to HEALTH_CHECK by running commands
-			// in their session, producing output, but may not update their bead.
-			// Session activity is a reliable liveness signal for these agents.
-			if activityErr == nil {
-				newActivity, err := t.GetSessionActivity(sessionName)
-				if err == nil && newActivity.After(baselineActivity) {
+			// Secondary signal: a new write under the agent's sandbox.
+			//
+			// Rescanned at a slower cadence than the bead check because a
+			// sandbox can hold several checkouts and a full walk is real I/O;
+			// heavy builds in this town are already serialized behind a lock
+			// for that reason. Missing a write by a few seconds costs nothing
+			// here, since the loop keeps running until the timeout.
+			if sandbox != "" && sinceLastSandboxScan(&lastSandboxScan, sandboxScanInterval) {
+				if worktreeWriteAdvanced(baselineWrite, scanAgentSandbox(sandbox)) {
 					responded = true
 					goto Done
 				}
@@ -1710,4 +1725,76 @@ func runDeaconFeedStrandedState(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// Health-check liveness helpers (cl-2sp).
+//
+// sandboxScanInterval throttles the sandbox walk. The health check's own tick
+// is 2s, which is right for reading a bead and wrong for walking a directory
+// tree that may hold several checkouts.
+const sandboxScanInterval = 6 * time.Second
+
+// agentSandboxDir maps an agent address to the directory its work lands in, or
+// "" when there is no such directory.
+//
+// The scope is the SANDBOX, not one checkout. A polecat sandbox can hold the
+// rig worktree plus scratch clones (a gastown fork, for instance), and work
+// done in a sibling clone is work (cl-hwl). Judging the agent by one checkout
+// answers about a fraction of what it is doing — the same wrong-object error
+// that put a lying instrument on every status surface in the first place.
+func agentSandboxDir(townRoot, address string) string {
+	if townRoot == "" || address == "" {
+		return ""
+	}
+	// Addresses are town-relative paths ("rig/polecats/dust", "rig/witness").
+	// Anything else — an absolute path, a traversal — is not an address.
+	if filepath.IsAbs(address) || strings.Contains(address, "..") {
+		return ""
+	}
+	dir := filepath.Join(townRoot, filepath.FromSlash(address))
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
+// scanAgentSandbox measures a sandbox, returning the zero Result when there is
+// nothing to measure. A bounded scan is used because this runs inside a polling
+// loop; truncation can only cost a positive, and this signal is read only as a
+// positive.
+func scanAgentSandbox(dir string) worktreewrite.Result {
+	if dir == "" {
+		return worktreewrite.Result{}
+	}
+	return worktreewrite.Scan(dir, worktreewrite.Options{MaxDuration: 2 * time.Second})
+}
+
+// worktreeWriteAdvanced reports whether current shows a write strictly newer
+// than baseline.
+//
+// Strictly newer, and only when BOTH scans succeeded and found a file. A
+// baseline that failed or found nothing cannot be advanced past: treating
+// "nothing, then something" as movement would fire on the first file any
+// process happens to create in a sandbox that was previously unreadable, and a
+// health check that reports a response nobody made is worse than one that
+// misses a response that was made.
+func worktreeWriteAdvanced(baseline, current worktreewrite.Result) bool {
+	if baseline.Err != nil || current.Err != nil {
+		return false
+	}
+	if !baseline.Found || !current.Found {
+		return false
+	}
+	return current.LastWrite.After(baseline.LastWrite)
+}
+
+// sinceLastSandboxScan reports whether interval has elapsed since the last scan,
+// updating the timestamp when it has.
+func sinceLastSandboxScan(last *time.Time, interval time.Duration) bool {
+	now := time.Now()
+	if now.Sub(*last) < interval {
+		return false
+	}
+	*last = now
+	return true
 }

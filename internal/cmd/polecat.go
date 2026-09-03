@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/worktreewrite"
 )
 
 // Polecat command flags
@@ -123,7 +124,7 @@ Displays comprehensive information including:
   - Assigned issue (if any)
   - Session status (running/stopped, attached/detached)
   - Session creation time
-  - Last activity time
+  - Last write under the polecat's worktree (the activity signal)
 
 NOTE: The argument is <rig>/<polecat> — a single argument with a slash
 separator, NOT two separate arguments. For example: greenplace/Toast
@@ -734,7 +735,27 @@ type PolecatStatus struct {
 	Attached       bool          `json:"attached,omitempty"`
 	Windows        int           `json:"windows,omitempty"`
 	CreatedAt      string        `json:"created_at,omitempty"`
-	LastActivity   string        `json:"last_activity,omitempty"`
+
+	// TmuxSessionActivity is tmux's session_activity for this session.
+	//
+	// IT WAS CALLED last_activity UNTIL cl-2sp AND THAT NAME WAS THE BUG. The
+	// value is right about a tmux session and says nothing about the agent:
+	// measured across ten live sessions on 2026-09-01 it equalled
+	// session_created in every one, including a session running commands at the
+	// moment of measurement. Two seats independently cited it as evidence a
+	// polecat was idle, and one of those readings reached an escalation that
+	// nearly restarted an agent forty minutes into a working turn.
+	//
+	// It is kept, under its true referent, because a session's creation time is
+	// genuinely useful for other questions. It is not an activity signal. Read
+	// LastWorktreeWrite instead — and read the direction rule that comes with it.
+	TmuxSessionActivity string `json:"tmux_session_activity,omitempty"`
+
+	// LastWorktreeWrite is when a file was last written under the polecat's
+	// clone, with the file named. See the worktreewrite package for the
+	// direction rule that governs it: a recent write proves work; silence
+	// proves NOTHING and must never authorize a restart, nudge or reap.
+	LastWorktreeWrite *worktreewrite.Result `json:"last_worktree_write,omitempty"`
 }
 
 func runPolecatStatus(cmd *cobra.Command, args []string) error {
@@ -784,7 +805,11 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 			status.CreatedAt = sessInfo.Created.Format("2006-01-02 15:04:05")
 		}
 		if !sessInfo.LastActivity.IsZero() {
-			status.LastActivity = sessInfo.LastActivity.Format("2006-01-02 15:04:05")
+			status.TmuxSessionActivity = sessInfo.LastActivity.Format("2006-01-02 15:04:05")
+		}
+		if p.ClonePath != "" {
+			ww := worktreewrite.Scan(p.ClonePath, worktreewrite.Options{})
+			status.LastWorktreeWrite = &ww
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -845,18 +870,68 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Created:       %s\n", sessInfo.Created.Format("2006-01-02 15:04:05"))
 		}
 
+		// Labelled by its referent, not as "Last Activity". The old label is
+		// what made this line evidence in two escalations it could not support
+		// (cl-2sp): tmux reports session age here, and a session outlives the
+		// agent process inside it, so a freshly restarted agent reads as hours
+		// quiet. The value stays; the claim it was making does not.
 		if !sessInfo.LastActivity.IsZero() {
-			// Show relative time for activity
 			ago := formatActivityTime(sessInfo.LastActivity)
-			fmt.Printf("  Last Activity: %s (%s)\n",
+			fmt.Printf("  tmux session_activity: %s (%s) %s\n",
 				sessInfo.LastActivity.Format("15:04:05"),
-				style.Dim.Render(ago))
+				style.Dim.Render(ago),
+				style.Dim.Render("— session age, not agent activity"))
 		}
 	} else {
 		fmt.Printf("  Status:        %s\n", style.Dim.Render("not running"))
 	}
 
+	// The real signal, printed for running and stopped polecats alike: a
+	// stopped session's last write is how a reader finds out what it got done.
+	if p.ClonePath != "" {
+		fmt.Println()
+		fmt.Printf("%s\n", style.Bold.Render("Worktree writes"))
+		printWorktreeWrite(worktreewrite.Scan(p.ClonePath, worktreewrite.Options{}))
+	}
+
 	return nil
+}
+
+// PolecatWorkingWindow is how recent a worktree write must be to count as
+// positive evidence that a polecat is working.
+//
+// It is deliberately generous. The cost of the two errors is wildly asymmetric:
+// calling a working polecat working a little too readily costs nothing, while
+// failing to and acting on it kills an in-progress turn and its uncommitted
+// work. Nothing in this codebase may invert that by treating a window miss as
+// evidence of the opposite (see worktreewrite's package comment).
+const PolecatWorkingWindow = 5 * time.Minute
+
+// printWorktreeWrite renders a scan so the reading states its own limits. The
+// no-writes branch prints the direction rule inline rather than assuming the
+// reader remembers it, because on cl-2sp two separate watchers — one of them
+// the author of the rule — read a quiet worktree as a stalled agent.
+func printWorktreeWrite(ww worktreewrite.Result) {
+	switch {
+	case ww.Err != nil:
+		fmt.Printf("  Last write:    %s\n", style.Warning.Render("not measured: "+ww.ErrText))
+	case !ww.Found:
+		fmt.Printf("  Last write:    %s\n", style.Dim.Render("none found"))
+		fmt.Printf("  %s\n", style.Dim.Render("NOT evidence of idleness: reading, thinking, and waiting on a"))
+		fmt.Printf("  %s\n", style.Dim.Render("child process all write nothing here."))
+	default:
+		verdict := style.Dim.Render("(no recent write — proves nothing either way)")
+		if ww.ProvesRecentWork(PolecatWorkingWindow) {
+			verdict = style.Success.Render("(working: writes are positive evidence)")
+		}
+		fmt.Printf("  Last write:    %s ago  %s\n", worktreewrite.FormatAge(ww.Age), verdict)
+		fmt.Printf("  File:          %s\n", style.Dim.Render(ww.LastWritePath))
+		fmt.Printf("  Scope:         %s\n", style.Dim.Render(fmt.Sprintf("%s (excluding %s)",
+			ww.Root, strings.Join(ww.ExcludedDirs, ", "))))
+		if ww.Truncated {
+			fmt.Printf("  %s\n", style.Dim.Render("scan truncated: age is an upper bound on the newest write"))
+		}
+	}
 }
 
 // formatActivityTime returns a human-readable relative time string.
