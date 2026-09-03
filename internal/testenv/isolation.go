@@ -88,6 +88,27 @@ const NudgeSinkFile = "nudge-sink.log"
 // appends to it; the transport guard in internal/tmux reads it.
 const TmuxSocketsEnv = "GT_TEST_TMUX_SOCKETS"
 
+// TownRootEnv points the isolated process at a town it owns.
+//
+// Stripping GT_TOWN_ROOT and GT_ROOT was not enough (cl-st8u). The workspace
+// lookup falls back to those variables only when the upward walk from the
+// working directory finds nothing, and a test binary's working directory is its
+// own package inside the gastown checkout — which on a Gas Town host sits
+// inside /gt. So the answer never came from the environment at all: it came
+// from the filesystem, and it was the operator's real town.
+//
+// The fix makes "no town" into "a town the test owns" rather than leaving a
+// hole for the walk to fall through. workspace.Find consults it (via
+// testsink.ConfineTownRoot) whenever the town it walked up into is not one this
+// process created.
+//
+// Kept as a literal rather than an import of internal/testsink so this package
+// stays dependency-free; TestSentinelNamesMatchTestsink pins the two together.
+const TownRootEnv = "GT_TEST_TOWN_ROOT"
+
+// TownFixtureDir is the fixture town's name inside the isolated HOME.
+const TownFixtureDir = "town"
+
 // TownSocketVar points gt at the tmux server the town's agents live on. Like
 // the town-root pointers below it is inherited by every agent session, and left
 // set it hands an isolated test process the panes of live seats.
@@ -196,6 +217,15 @@ func IsolateProcessEnv() func() {
 	for _, key := range TownRootVars {
 		unsetEnv(key)
 	}
+
+	// Stripping them is necessary and not sufficient. The fallback those
+	// variables feed is only consulted when the walk UP from the working
+	// directory finds nothing, and a test's working directory is its package
+	// inside the gastown checkout, which on a Gas Town host is inside /gt. The
+	// walk therefore answered with the operator's live town no matter what the
+	// environment said (cl-st8u). Give the process a town of its own instead,
+	// so the lookup has somewhere harmless to land.
+	setEnv(TownRootEnv, writeFixtureTown(home))
 
 	if os.Getenv(AllowRealDoltEnv) != "1" {
 		SetDoltEndpointEnv("127.0.0.1", UnreachableDoltPort)
@@ -323,6 +353,33 @@ func writeTestDoltConfig(home string) {
 		fmt.Fprintf(os.Stderr, "testenv.IsolateProcessEnv: writing dolt global config: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// writeFixtureTown builds a minimal but real Gas Town workspace inside the
+// isolated HOME and returns its root.
+//
+// Real, not a bare path: callers of the lookup go on to stat the root, load
+// mayor/town.json for the town name, and join runtime paths onto it. A pointer
+// at a directory that does not exist would turn the escape into a crop of
+// confusing failures in unrelated packages, which is how a safety fix gets
+// reverted.
+//
+// It is deliberately EMPTY apart from the marker. A test that needs rigs,
+// seats or queues builds them, and one that silently depended on the operator's
+// town having them should fail rather than quietly keep reading a real one.
+func writeFixtureTown(home string) string {
+	root := filepath.Join(home, TownFixtureDir)
+	mayorDir := filepath.Join(root, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "testenv.IsolateProcessEnv: creating fixture town %s: %v\n", root, err)
+		os.Exit(1)
+	}
+	const townJSON = `{"type":"town","version":1,"name":"gt-test-town"}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "testenv.IsolateProcessEnv: writing fixture town config: %v\n", err)
+		os.Exit(1)
+	}
+	return root
 }
 
 // WithoutDoltEndpoint clears the Dolt endpoint variables for one test and
@@ -462,6 +519,18 @@ func assertHomeAndActorIsolated(t *testing.T) {
 		if got := os.Getenv(key); got != "" {
 			t.Errorf("%s = %q, want empty — a test outside a town must not fall back to the operator's real one", key, got)
 		}
+	}
+
+	townRoot := os.Getenv(TownRootEnv)
+	if townRoot == "" {
+		t.Errorf("%s is unset — without a town of its own the workspace lookup walks up into the operator's live town (cl-st8u)", TownRootEnv)
+		return
+	}
+	if !strings.HasPrefix(townRoot, home+string(filepath.Separator)) {
+		t.Errorf("%s = %q, want a directory under the isolated HOME %q", TownRootEnv, townRoot, home)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "mayor", "town.json")); err != nil {
+		t.Errorf("fixture town %q is not a workspace: %v", townRoot, err)
 	}
 }
 

@@ -23,6 +23,60 @@ func TestSentinelNamesMatchTestenv(t *testing.T) {
 	if EnvNudgeLog != testenv.NudgeSinkEnv {
 		t.Errorf("EnvNudgeLog = %q, testenv.NudgeSinkEnv = %q — intercepted nudges would go unrecorded", EnvNudgeLog, testenv.NudgeSinkEnv)
 	}
+	if EnvTownRoot != testenv.TownRootEnv {
+		t.Errorf("EnvTownRoot = %q, testenv.TownRootEnv = %q — the workspace lookup would find no town of its own and walk up into the operator's (cl-st8u)", EnvTownRoot, testenv.TownRootEnv)
+	}
+	if EnvTmuxSockets != testenv.TmuxSocketsEnv {
+		t.Errorf("EnvTmuxSockets = %q, testenv.TmuxSocketsEnv = %q — a test-owned tmux server would look foreign", EnvTmuxSockets, testenv.TmuxSocketsEnv)
+	}
+}
+
+// TestConfineTownRootRedirectsAForeignTown covers the lookup half of the guard.
+// The town-root escape (cl-st8u) is not an environment leak — it is the upward
+// walk finding a real town the process happens to sit inside — so what the
+// guard judges is the path it was handed.
+func TestConfineTownRootRedirectsAForeignTown(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "town")
+	t.Setenv(EnvIsolated, "1")
+	t.Setenv(EnvTownRoot, fixture)
+
+	if got := ConfineTownRoot("/gt"); got != fixture {
+		t.Errorf("ConfineTownRoot(%q) = %q, want the fixture %q", "/gt", got, fixture)
+	}
+
+	owned := t.TempDir()
+	if got := ConfineTownRoot(owned); got != owned {
+		t.Errorf("ConfineTownRoot(%q) = %q — a town the test owns must survive, or the lookup stops being exercised", owned, got)
+	}
+
+	if got := ConfineTownRoot(""); got != "" {
+		t.Errorf("ConfineTownRoot(\"\") = %q, want \"\" — 'no town' is already the safe answer", got)
+	}
+}
+
+// TestConfineTownRootRefusesWhenItHasNowhereSafe pins the degradation. With no
+// fixture configured the guard answers "no town" rather than handing back the
+// foreign one: callers read "" as not-in-a-town and decline to write, which is
+// the outcome this whole family exists to produce.
+func TestConfineTownRootRefusesWhenItHasNowhereSafe(t *testing.T) {
+	t.Setenv(EnvIsolated, "1")
+	t.Setenv(EnvTownRoot, "")
+
+	if got := ConfineTownRoot("/gt"); got != "" {
+		t.Errorf("ConfineTownRoot(%q) = %q with no fixture town, want \"\"", "/gt", got)
+	}
+}
+
+// TestConfineTownRootIsInertOutsideATestProcess is the production guarantee:
+// every gt command resolves a town root through this path, and none of them may
+// be redirected by a variable an unrelated process left in the environment.
+func TestConfineTownRootIsInertOutsideATestProcess(t *testing.T) {
+	t.Setenv(EnvIsolated, "")
+	t.Setenv(EnvTownRoot, filepath.Join(t.TempDir(), "town"))
+
+	if got := ConfineTownRoot("/gt"); got != "/gt" {
+		t.Errorf("ConfineTownRoot(%q) = %q outside a test process, want it untouched", "/gt", got)
+	}
 }
 
 func TestActiveFollowsTheSentinel(t *testing.T) {
