@@ -106,7 +106,12 @@ gt done                  # Submit and self-clean
 4. If formula attached, steps are shown inline by `gt prime`
 5. Work through the checklist, then `gt done`
 
-**If NO work on hook and NO mail:** run `gt done` immediately.
+**If NO work on hook and NO mail:** run `gt done --status DEFERRED` immediately.
+
+`--status DEFERRED` exits without submitting anything. A plain `gt done` from an
+empty hook is refused (cl-lqj): it would submit the branch this sandbox happens
+to be on — work you were not given and nobody reviewed. Restarted sessions have
+reached the front of the merge queue exactly that way.
 
 **If your assigned bead has nothing to implement** (already done, can't reproduce, not applicable):
 ```bash
@@ -117,6 +122,10 @@ gt done
 patrol resets the bead to `open` and dispatches it to a new polecat — causing spawn storms
 (6-7 polecats assigned the same bead). Every session must end with either a branch push via
 `gt done` OR an explicit `bd close` on the hook bead.
+
+**Close only when there is nothing to submit.** Closing your bead empties your hook, and
+`gt done` refuses to submit from an empty hook. If you have commits, run `gt done` first —
+the Refinery closes the bead when it merges.
 
 ---
 
