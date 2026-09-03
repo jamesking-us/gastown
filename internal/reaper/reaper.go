@@ -16,6 +16,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
@@ -633,7 +634,24 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables)
+	// This is the largest wisp deleter in the tree and the one behind the 1449
+	// wisps lost on 2026-09-01. It deletes by direct SQL from a table in
+	// dolt_ignore, so nothing it removes is in any Dolt commit and no AS OF can
+	// read it back. The log below is the only record that outlives the delete,
+	// which is why an unwritable log stops the purge instead of warning about it.
+	deletionLog := &wispDeletionLog{
+		// "reaper" covers both callers — the daemon's wisp_reaper patrol and
+		// `gt reaper purge` at a terminal — and GT_ROLE names the agent
+		// session when there is one. Neither may be labelled as the other.
+		actor: wispaudit.Actor("reaper"),
+		scope: "closed_at<" + deleteCutoff.Format(time.RFC3339),
+		db:    dbName,
+	}
+
+	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
+	if totalDeleted > 0 {
+		deletionLog.completed(totalDeleted)
+	}
 	if err != nil {
 		return totalDeleted, anomalies, err
 	}
@@ -658,6 +676,80 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	}
 
 	return totalDeleted, anomalies, nil
+}
+
+// wispDeletionLog is the reaper's half of the one durable wisp deletion record
+// (hq-6ewp). Every batch is named in <town>/.events.jsonl before it is deleted,
+// and a batch whose record will not write is not deleted.
+//
+// It accumulates what it planned so the closing record can name the whole set
+// rather than just count it — the question asked afterwards is always "which
+// wisps went", and by then there is nothing left to ask.
+type wispDeletionLog struct {
+	actor   string
+	scope   string
+	db      string
+	planned []wispaudit.Wisp
+}
+
+// planBatch records one batch and reports whether the delete may proceed.
+func (l *wispDeletionLog) planBatch(ctx context.Context, db *sql.DB, ids []string) error {
+	batch := lookupWispTitles(ctx, db, ids)
+	if err := wispaudit.Plan(l.actor, wispaudit.PathReaper, l.scope, l.db, batch, nil); err != nil {
+		return fmt.Errorf("refusing to delete %d wisps: the deletion could not be recorded first: %w", len(ids), err)
+	}
+	l.planned = append(l.planned, batch...)
+	return nil
+}
+
+// completed writes the closing record. Best-effort: the delete has happened and
+// the planned records already name every id, so a failure here loses the
+// outcome, not the evidence.
+func (l *wispDeletionLog) completed(deleted int) {
+	_ = wispaudit.Completed(l.actor, wispaudit.PathReaper, l.scope, l.db, l.planned, nil,
+		map[string]interface{}{"deleted_rows": deleted})
+}
+
+// lookupWispTitles fills in the titles for a batch of ids. A title is what makes
+// a deletion record legible to a human afterwards, but it is not what makes it
+// valid: if the lookup fails the ids are recorded without titles rather than the
+// batch going unrecorded, because an id-only record still names what was lost.
+func lookupWispTitles(ctx context.Context, db *sql.DB, ids []string) []wispaudit.Wisp {
+	fallback := wispaudit.WispsFromIDs(ids)
+	if len(ids) == 0 {
+		return fallback
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT id, title FROM wisps WHERE id IN (%s)", strings.Join(placeholders, ",")) //nolint:gosec // G201: placeholders only
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fallback
+	}
+	defer rows.Close()
+
+	titles := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, title string
+		if err := rows.Scan(&id, &title); err != nil {
+			return fallback
+		}
+		titles[id] = title
+	}
+	if err := rows.Err(); err != nil {
+		return fallback
+	}
+
+	out := make([]wispaudit.Wisp, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, wispaudit.Wisp{ID: id, Title: titles[id]})
+	}
+	return out
 }
 
 func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
@@ -696,7 +788,10 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		dbName, dbName, DefaultBatchSize)
 	auxTables := []string{"labels", "comments", "events", "dependencies"}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables)
+	// No deletion record: mail lives in `issues`, which is NOT in dolt_ignore,
+	// so these rows are committed and readable back with AS OF. The record
+	// exists for the tables that have no history, not for every delete.
+	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables, nil)
 	if err != nil {
 		return totalDeleted, err
 	}
@@ -847,7 +942,7 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string) (int, error) {
+func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, *sql.DB, []string) error) (int, error) {
 	totalDeleted := 0
 	for {
 		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)
@@ -868,6 +963,17 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg 
 
 		if len(ids) == 0 {
 			break
+		}
+
+		// Record before deleting, and stop if the record will not write. The
+		// aux-table deletes below are already irreversible for a table with no
+		// Dolt history, so there is no point past this one at which the set can
+		// still be named. nil means the primary table has real history and
+		// needs no side record — see the call sites.
+		if record != nil {
+			if err := record(ctx, db, ids); err != nil {
+				return totalDeleted, err
+			}
 		}
 
 		placeholders := make([]string, len(ids))

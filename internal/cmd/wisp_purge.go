@@ -22,6 +22,12 @@ package cmd
 //  2. Receipt before deletion. The audit record naming every id is written
 //     BEFORE the delete, because after the delete there is nothing left to
 //     name them. If the record cannot be written, the delete does not happen.
+//
+// Rule 2 is no longer local to this file. hq-6ewp generalized it: every path in
+// the tree that removes rows from the wisps family — compaction, the reaper, the
+// pre-push GC, the patrol digest cleanup — writes to the same log through
+// internal/wispaudit, under the same refuse-if-unrecordable rule. The helpers
+// below are this file's callers of it.
 
 import (
 	"encoding/json"
@@ -31,7 +37,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 // unscopedPurgeMinAge is the age floor for the purge paths that still operate
@@ -151,7 +157,7 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 		return
 	}
 
-	var ids []string
+	var doomed []wispaudit.Wisp
 	kept := 0
 	for _, w := range moleculeSubtree(all, moleculeID) {
 		// Closed only. A wisp that is open, blocked, in_progress or pinned is
@@ -163,10 +169,10 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 			kept++
 			continue
 		}
-		ids = append(ids, w.ID)
+		doomed = append(doomed, wispaudit.Wisp{ID: w.ID, Title: w.Title})
 	}
 
-	if len(ids) == 0 {
+	if len(doomed) == 0 {
 		return
 	}
 
@@ -174,12 +180,13 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 	if kept > 0 {
 		extra["kept_evidence_bearing"] = kept
 	}
-	if !recordWispPurgePlan(actor, "molecule:"+moleculeID, scopeDB, ids, extra) {
+	scope := "molecule:" + moleculeID
+	if !recordWispPurgePlan(actor, wispaudit.PathDonePurge, scope, scopeDB, doomed, extra) {
 		return
 	}
 
-	deleted, failures := deleteWispIDs(bd, ids)
-	reportWispPurge(actor, "molecule:"+moleculeID, scopeDB, deleted, failures, extra)
+	deleted, failures := deleteWisps(bd, doomed)
+	reportWispPurge(actor, wispaudit.PathDonePurge, scope, scopeDB, deleted, failures, extra)
 }
 
 // purgeClosedEphemeralBeads purges closed ephemeral beads across the database
@@ -196,7 +203,7 @@ func purgeClosedEphemeralBeads(bd *beads.Beads, actor, scopeDB string) {
 	// enumerated here instead — an approximate list of names beats an exact
 	// number when the question later is "what was in there".
 	predicted := predictUnscopedPurge(bd)
-	if !recordWispPurgePlan(actor, "database", scopeDB, predicted, map[string]interface{}{
+	if !recordWispPurgePlan(actor, wispaudit.PathPolecatNuke, "database", scopeDB, predicted, map[string]interface{}{
 		"older_than": unscopedPurgeMinAge,
 		"predicted":  true,
 	}) {
@@ -215,7 +222,7 @@ func purgeClosedEphemeralBeads(bd *beads.Beads, actor, scopeDB string) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads older than %s: %s\n", unscopedPurgeMinAge, outStr)
-	reportWispPurge(actor, "database", scopeDB, predicted, nil, map[string]interface{}{
+	reportWispPurge(actor, wispaudit.PathPolecatNuke, "database", scopeDB, predicted, nil, map[string]interface{}{
 		"older_than":     unscopedPurgeMinAge,
 		"predicted":      true,
 		"reported_count": outStr,
@@ -228,13 +235,13 @@ func purgeClosedEphemeralBeads(bd *beads.Beads, actor, scopeDB string) {
 // record it as such. An error here is not fatal: an approximate receipt is
 // still better than no receipt, and a purge with an empty prediction still
 // runs under its age floor.
-func predictUnscopedPurge(bd *beads.Beads) []string {
+func predictUnscopedPurge(bd *beads.Beads) []wispaudit.Wisp {
 	all, err := listAllWisps(bd)
 	if err != nil {
 		return nil
 	}
 	cutoff := time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)
-	var ids []string
+	var predicted []wispaudit.Wisp
 	for _, w := range all {
 		if w.Status != "closed" {
 			continue
@@ -242,9 +249,9 @@ func predictUnscopedPurge(bd *beads.Beads) []string {
 		if closedAt, ok := wispClosedAt(w); ok && closedAt.After(cutoff) {
 			continue
 		}
-		ids = append(ids, w.ID)
+		predicted = append(predicted, wispaudit.Wisp{ID: w.ID, Title: w.Title})
 	}
-	return ids
+	return predicted
 }
 
 // wispClosedAt reports when a wisp was closed, falling back to its last update
@@ -275,9 +282,8 @@ func wispClosedAt(w *purgeCandidate) (time.Time, bool) {
 // leaves no trace anywhere else; a receipt written after the delete is lost
 // exactly when it matters most (a crash mid-purge). Writing first costs one
 // append and makes the set recoverable-by-name in every case.
-func recordWispPurgePlan(actor, scope, scopeDB string, ids []string, extra map[string]interface{}) bool {
-	err := events.LogAuditDurable(events.TypeWispPurge,
-		actor, events.WispPurgePayload("planned", scope, scopeDB, ids, extra))
+func recordWispPurgePlan(actor, path, scope, scopeDB string, wisps []wispaudit.Wisp, extra map[string]interface{}) bool {
+	err := wispaudit.Plan(actor, path, scope, scopeDB, wisps, extra)
 	if err == nil {
 		return true
 	}
@@ -289,30 +295,27 @@ func recordWispPurgePlan(actor, scope, scopeDB string, ids []string, extra map[s
 // reportWispPurge writes the post-deletion record. Unlike the plan record this
 // one is advisory: the deletion already happened, and the plan record already
 // names the ids.
-func reportWispPurge(actor, scope, scopeDB string, deleted []string, failures []string, extra map[string]interface{}) {
-	payload := events.WispPurgePayload("completed", scope, scopeDB, deleted, extra)
-	if len(failures) > 0 {
-		payload["failed"] = failures
-	}
-	if err := events.LogAudit(events.TypeWispPurge, actor, payload); err != nil {
+func reportWispPurge(actor, path, scope, scopeDB string, deleted []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
+	if err := wispaudit.Completed(actor, path, scope, scopeDB, deleted, failures, extra); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't record wisp purge completion: %v\n", err)
 	}
 }
 
-// deleteWispIDs deletes ids in batches, returning what went and what didn't.
+// deleteWisps deletes wisps in batches, returning what went and what didn't.
 // A failed batch is reported rather than retried one id at a time: the plan
 // record already names every id, so a partial purge is auditable as it stands.
-func deleteWispIDs(bd *beads.Beads, ids []string) (deleted []string, failures []string) {
-	for start := 0; start < len(ids); start += maxWispDeleteBatch {
+func deleteWisps(bd *beads.Beads, wisps []wispaudit.Wisp) (deleted []wispaudit.Wisp, failures []string) {
+	for start := 0; start < len(wisps); start += maxWispDeleteBatch {
 		end := start + maxWispDeleteBatch
-		if end > len(ids) {
-			end = len(ids)
+		if end > len(wisps) {
+			end = len(wisps)
 		}
-		batch := ids[start:end]
-		args := append([]string{"delete"}, batch...)
+		batch := wisps[start:end]
+		ids := wispaudit.IDs(batch)
+		args := append([]string{"delete"}, ids...)
 		args = append(args, "--force")
 		if _, err := bd.Run(args...); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", strings.Join(batch, ","), err))
+			failures = append(failures, fmt.Sprintf("%s: %v", strings.Join(ids, ","), err))
 			continue
 		}
 		deleted = append(deleted, batch...)

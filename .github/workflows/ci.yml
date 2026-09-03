@@ -154,6 +154,14 @@ jobs:
       - name: Test-isolation coverage
         run: scripts/guards/isolation-coverage-guard.sh
 
+      # Static control for hq-6ewp: the wisps table family is in dolt_ignore, so
+      # a deleted wisp is in no Dolt commit and no AS OF reads it back. Every
+      # path that deletes from it must write the durable record first, and a new
+      # deleter added without one is a lint failure rather than a silent,
+      # permanent, unattributable loss. Compiles nothing and runs no tests.
+      - name: Wisp deletion record coverage
+        run: scripts/guards/wisp-deletion-record-guard.sh
+
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest

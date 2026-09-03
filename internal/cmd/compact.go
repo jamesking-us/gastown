@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 var (
@@ -57,7 +58,11 @@ var compactCmd = &cobra.Command{
 	Long: `Apply TTL-based compaction policy to ephemeral wisps.
 
 For non-closed wisps past TTL: promotes to permanent beads (something is stuck).
-For closed wisps past TTL: deletes them (Dolt AS OF preserves history).
+For closed wisps past TTL: deletes them. The deletion is PERMANENT: the wisps
+tables are in dolt_ignore, so nothing here is ever committed and Dolt AS OF
+cannot read a deleted wisp back (hq-6ewp). Each deletion is recorded to
+<town>/.events.jsonl before it happens, and one that cannot be recorded is
+skipped; that record is the only trace that survives.
 Wisps with comments or keep labels are always promoted.
 
 TTLs by wisp type:
@@ -203,6 +208,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 	}
 
 	result := &compactResult{}
+	audit := compactAudit{actor: detectSender(), db: rigName}
 
 	for _, w := range allWisps {
 		age, err := wispAge(w, now)
@@ -226,7 +232,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 				promoteWisp(bd, w, "proven value", result)
 			} else if age > ttl {
 				if isMoleculeStep {
-					deleteWisp(bd, w, "molecule step past TTL", result)
+					deleteWisp(bd, w, "molecule step past TTL", result, audit)
 				} else {
 					reason := "open past TTL"
 					if w.Status == "in_progress" {
@@ -246,7 +252,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 			if shouldPromote && !isMoleculeStep {
 				promoteWisp(bd, w, "proven value", result)
 			} else if age > ttl {
-				deleteWisp(bd, w, "TTL expired", result)
+				deleteWisp(bd, w, "TTL expired", result, audit)
 			} else {
 				result.Skipped++
 				if compactVerbose && !compactJSON {
@@ -376,8 +382,29 @@ func promoteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compac
 	}
 }
 
+// compactAudit carries what the deletion record needs and the compaction loop
+// would otherwise have to thread through every call.
+type compactAudit struct {
+	actor string
+	db    string
+}
+
 // deleteWisp removes a closed wisp that has expired past its TTL.
-func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult) {
+//
+// The record comes first. This is the delete the comment here used to call
+// "safe: Dolt AS OF preserves history" — the sentence hq-6ewp was filed against,
+// reproduced verbatim into the patrol formula's Step 20 and read by every deacon
+// cycle since. It was false. wisps and wisp_% are in dolt_ignore, so no wisp
+// table is ever committed and `AS OF` answers table-not-found on the one table
+// compaction is authorised to delete from. There is no undo behind this line;
+// the audit record in .events.jsonl is the only thing that outlives it.
+//
+// Recorded per wisp rather than per pass, so the record is immediately before
+// its delete even if the pass dies partway. One flock'd append per deleted wisp
+// is affordable: compaction is maintenance, not a hot path, and the alternative
+// is a batch record that can be minutes stale by the time the delete it
+// describes actually happens.
+func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult, audit compactAudit) {
 	action := compactAction{ID: w.ID, Title: w.Title, Reason: reason, WispType: w.WispType}
 
 	if compactDryRun {
@@ -389,7 +416,17 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
-	// bd delete --force (safe: Dolt AS OF preserves history)
+	doomed := []wispaudit.Wisp{{ID: w.ID, Title: w.Title}}
+	extra := map[string]interface{}{"reason": reason}
+	if w.WispType != "" {
+		extra["wisp_type"] = w.WispType
+	}
+	if err := wispaudit.Plan(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, doomed, extra); err != nil {
+		result.Errors = append(result.Errors,
+			fmt.Sprintf("delete %s: skipped, could not record the deletion first: %v", w.ID, err))
+		return
+	}
+
 	_, err := bd.Run("delete", w.ID, "--force")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: %v", w.ID, err))
@@ -397,6 +434,7 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 	}
 
 	result.Deleted = append(result.Deleted, action)
+	_ = wispaudit.Completed(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, doomed, nil, extra)
 
 	if compactVerbose && !compactJSON {
 		fmt.Printf("  %s %s %s (%s)\n",
