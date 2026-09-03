@@ -359,3 +359,35 @@ func TestReadSessionHeartbeat_V2AllStates(t *testing.T) {
 		})
 	}
 }
+
+// TestTouchSessionHeartbeatWithStateErr covers the reporting variant. `gt
+// heartbeat` prints "Heartbeat updated" for every role in the town, so it needs
+// to know whether the file was actually written (hq-huln).
+func TestTouchSessionHeartbeatWithStateErr(t *testing.T) {
+	townRoot := t.TempDir()
+
+	if err := TouchSessionHeartbeatWithStateErr(townRoot, "gt-test-err", HeartbeatWorking, "", ""); err != nil {
+		t.Fatalf("unexpected error on a writable town root: %v", err)
+	}
+	if hb := ReadSessionHeartbeat(townRoot, "gt-test-err"); hb == nil {
+		t.Fatal("expected a heartbeat file")
+	}
+}
+
+func TestTouchSessionHeartbeatWithStateErr_ReportsWriteFailure(t *testing.T) {
+	// A file where the heartbeats directory has to go: MkdirAll fails, and the
+	// caller must hear about it rather than print success over it.
+	townRoot := t.TempDir()
+	runtimeDir := filepath.Join(townRoot, ".runtime")
+	if err := os.WriteFile(runtimeDir, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := TouchSessionHeartbeatWithStateErr(townRoot, "gt-test-fail", HeartbeatWorking, "", "")
+	if err == nil {
+		t.Fatal("expected an error when the heartbeat file cannot be written")
+	}
+
+	// The best-effort wrapper keeps swallowing it, for callers that print nothing.
+	TouchSessionHeartbeatWithState(townRoot, "gt-test-fail", HeartbeatWorking, "", "")
+}

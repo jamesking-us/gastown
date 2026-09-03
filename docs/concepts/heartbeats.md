@@ -41,13 +41,44 @@ refreshed its session heartbeat while the file store aged past threshold).
   session limits, one very long patrol turn) leaves this label stale for
   hours even though the agent is healthy.
 
+## Reporting contract (hq-huln)
+
+A heartbeat command may skip a store, but it may never report success for a
+store that did not write. `gt deacon heartbeat` printed `✓ Heartbeat updated`
+off store 1 alone while store 3 was skipped by its throttle or failing against
+bd; the Deacon that found it watched its own liveness label sit frozen through
+five cheerful invocations.
+
+- **Say which stores are behind the ✓.** `gt deacon heartbeat` prints
+  `✓ Heartbeat updated (file, bead label 1788382163)`, or
+  `(file, bead label fresh, next refresh in 44s)` when the throttle skipped the
+  refresh. A skip is a legitimate outcome — an unreported skip is not.
+- **A store that fails is a command that fails.** Any store error exits
+  non-zero with `✗ Heartbeat INCOMPLETE`, carrying bd's own stderr. The stores
+  fail independently, so the message names each one.
+- **Read the label back.** `bd update` exiting 0 is not evidence the label
+  landed, and store 3 is the one Witness second-order monitoring reads. The
+  bead sync re-reads it and fails loudly unless the stored epoch is at least
+  the one just written — a *newer* epoch passes, because `await-signal` may
+  legitimately refresh the same label in between.
+
+The throttle on store 3 stays: each refresh is a Dolt commit. It is half the
+stale threshold (150s), which is shorter than an ordinary patrol cycle and
+longer than a burst of manual probes — so under fast probing the label looks
+frozen while nothing is wrong. That is a reason to report the skip, not to
+remove the throttle.
+
 ## Rules of thumb
 
 - **Deacon sessions:** `gt deacon heartbeat` refreshes the Deacon file and
   throttled bead label. `gt heartbeat` also refreshes the session store and,
   when `GT_ROLE=deacon`, uses the same Deacon file/label sync path.
 - **Polecats / Witness / Refinery:** `gt heartbeat` (session store) is the
-  one that matters.
+  one that matters. It reports its own write failure: the same
+  success-over-a-failed-write shape lived in store 2 for every role, since
+  `TouchSessionHeartbeatWithState` drops errors. Callers that print nothing
+  still use that best-effort form; callers that claim the heartbeat was
+  updated use `TouchSessionHeartbeatWithStateErr`.
 - **Monitoring scripts:** never declare an agent stuck from a single store.
   Cross-check tmux session activity (`tmux display-message -p
   '#{window_activity}'`) before escalating — a live session with a stale

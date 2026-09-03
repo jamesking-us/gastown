@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -241,7 +242,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 			result.IdleCycles = newIdleCycles
 		}
 		// Update last_activity so watchers know agent is still alive
-		if err := updateAgentHeartbeat(awaitSignalAgentBead, beadsDir); err != nil {
+		if _, err := updateAgentHeartbeat(awaitSignalAgentBead, beadsDir); err != nil {
 			if !awaitSignalQuiet {
 				fmt.Printf("%s Failed to update agent heartbeat: %v\n",
 					style.Dim.Render("⚠"), err)
@@ -251,7 +252,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		_ = clearAgentBackoffUntil(awaitSignalAgentBead, beadsDir)
 	} else if result.Reason == "signal" && awaitSignalAgentBead != "" {
 		// On signal, update last_activity to prove agent is alive
-		if err := updateAgentHeartbeat(awaitSignalAgentBead, beadsDir); err != nil {
+		if _, err := updateAgentHeartbeat(awaitSignalAgentBead, beadsDir); err != nil {
 			if !awaitSignalQuiet {
 				fmt.Printf("%s Failed to update agent heartbeat: %v\n",
 					style.Dim.Render("⚠"), err)
@@ -428,23 +429,26 @@ func parseIntSimple(s string) (int, error) {
 
 // updateAgentHeartbeat records a heartbeat timestamp on an agent bead via a
 // heartbeat:EPOCH label. This proves the agent is alive during long idle periods.
+// It returns the epoch it wrote so callers can read the label back and confirm
+// it landed; a zero exit from bd is not by itself evidence of a write.
 //
 // bd agent heartbeat was never shipped (steveyegge/beads#2828). We use the same
 // read-modify-write label pattern as setAgentIdleCycles instead.
-func updateAgentHeartbeat(agentBead, beadsDir string) error {
+func updateAgentHeartbeat(agentBead, beadsDir string) (int64, error) {
 	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	var newLabels []string
 	for _, label := range allLabels {
-		if len(label) > 10 && label[:10] == "heartbeat:" {
+		if strings.HasPrefix(label, "heartbeat:") {
 			continue // Replace existing heartbeat label
 		}
 		newLabels = append(newLabels, label)
 	}
-	newLabels = append(newLabels, fmt.Sprintf("heartbeat:%d", time.Now().Unix()))
+	epoch := time.Now().Unix()
+	newLabels = append(newLabels, fmt.Sprintf("heartbeat:%d", epoch))
 
 	args := []string{"update", agentBead}
 	for _, label := range newLabels {
@@ -455,7 +459,17 @@ func updateAgentHeartbeat(agentBead, beadsDir string) error {
 	defer cancel()
 
 	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-	return cmd.Run()
+	// Keep bd's own diagnosis: a bare "exit status 1" tells a reader nothing
+	// about why the town's liveness signal stopped advancing.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return epoch, fmt.Errorf("%w: %s", err, msg)
+		}
+		return epoch, err
+	}
+	return epoch, nil
 }
 
 // setAgentIdleCycles sets the idle:N label on an agent bead.

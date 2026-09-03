@@ -241,8 +241,15 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	// Update agent bead idle cycles and heartbeat
 	if awaitEventAgentBead != "" && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
-		// think we're dead during long idle periods.
-		_ = updateAgentHeartbeat(awaitEventAgentBead, beadsDir)
+		// think we're dead during long idle periods. Report a failed write:
+		// silently dropping it leaves the witness reading a frozen label with
+		// nothing anywhere saying why (hq-huln).
+		if _, err := updateAgentHeartbeat(awaitEventAgentBead, beadsDir); err != nil {
+			if !awaitEventQuiet {
+				fmt.Printf("%s Failed to update agent heartbeat: %v\n",
+					style.Dim.Render("⚠"), err)
+			}
+		}
 
 		if result.Reason == "timeout" {
 			newIdle := idleCycles + 1
@@ -257,7 +264,12 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		} else if result.Reason == "event" {
 			// Reset idle on event received
 			if idleCycles > 0 {
-				_ = setAgentIdleCycles(awaitEventAgentBead, beadsDir, 0)
+				if err := setAgentIdleCycles(awaitEventAgentBead, beadsDir, 0); err != nil {
+					if !awaitEventQuiet {
+						fmt.Printf("%s Failed to reset idle count: %v\n",
+							style.Dim.Render("⚠"), err)
+					}
+				}
 			}
 			result.IdleCycles = 0
 		}
