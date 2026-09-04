@@ -20,6 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every PID-existence probe treated a zombie as alive, and every `pgrep -f`
+  check could match itself** (cl-d77p). A bare `Signal(0)`/`kill -0` succeeds
+  against a zombie (defunct) child — the kernel keeps its PID allocated until
+  the parent reaps it — so eight call sites across `internal/daemon`,
+  `internal/nudge`, `internal/acp`, `internal/mayor`, `internal/lock`,
+  `internal/session` and `internal/polecat` could report a process as running
+  after its real work had already finished. Separately, five polecat monitor
+  loops of the shape `until ! pgrep -f "go test ./..."; do sleep N; done`
+  matched their own `bash -c` wrapper command line and could never observe
+  "no matches," stranding a polecat for 40 minutes; a second instance made a
+  pid-file health check for `gt nudge-poller` read a dead poller as healthy —
+  same defect, opposite failure direction (hang vs. false all-clear). Both are
+  now centralized in `internal/procutil`: `IsAlive`/`IsProcessAlive` verify
+  `ps` state is not zombie before trusting a signal-0 check, and
+  `FindByPattern` excludes the caller's own PID and its parent's before
+  trusting a `pgrep -f` match. The eight duplicated implementations now
+  delegate to it; `scripts/migration-test/vm-integration-test.sh`'s two
+  `pgrep -f` checks route through one local helper with the same guards.
 - **`last_activity` was session creation time, under a name that invited the
   opposite reading** (cl-2sp). Measured across three live polecats created 36,
   31 and 9 minutes apart, `last_activity` equalled `created_at` to the second in

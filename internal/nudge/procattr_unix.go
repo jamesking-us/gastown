@@ -5,6 +5,8 @@ package nudge
 import (
 	"os"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 // detachedProcAttr returns SysProcAttr that detaches the child from
@@ -15,9 +17,10 @@ func detachedProcAttr() *syscall.SysProcAttr {
 	}
 }
 
-// isProcessAlive checks if a process is running via signal 0.
+// isProcessAlive checks if a process is running (and not a zombie awaiting
+// reap — see internal/procutil for why a bare signal-0 check is not enough).
 func isProcessAlive(proc *os.Process) bool {
-	return proc.Signal(syscall.Signal(0)) == nil
+	return procutil.IsProcessAlive(proc)
 }
 
 // terminateProcess sends SIGTERM for graceful shutdown.

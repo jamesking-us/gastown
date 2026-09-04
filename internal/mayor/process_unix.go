@@ -2,20 +2,10 @@
 
 package mayor
 
-import (
-	"os"
-	"syscall"
-)
+import "github.com/steveyegge/gastown/internal/procutil"
 
+// acpProcessAlive checks if a process is running (and not a zombie awaiting
+// reap — see internal/procutil for why a bare signal-0 check is not enough).
 func acpProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	return process.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(pid)
 }

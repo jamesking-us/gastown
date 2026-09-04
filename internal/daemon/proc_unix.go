@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 // setSysProcAttr sets platform-specific process attributes.
@@ -16,9 +18,10 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
-// isProcessAlive checks if a process is still running.
+// isProcessAlive checks if a process is still running (and not a zombie
+// awaiting reap — see internal/procutil for why that distinction matters).
 func isProcessAlive(p *os.Process) bool {
-	return p.Signal(syscall.Signal(0)) == nil
+	return procutil.IsProcessAlive(p)
 }
 
 // sendTermSignal sends SIGTERM for graceful shutdown.

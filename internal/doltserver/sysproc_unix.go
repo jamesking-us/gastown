@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 // setProcessGroup puts the command in its own process group so that signals
@@ -15,13 +17,11 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// processIsAlive checks whether a process with the given PID is still running.
+// processIsAlive checks whether a process with the given PID is still
+// running (and not a zombie awaiting reap — see internal/procutil for why a
+// bare signal-0 check is not enough).
 func processIsAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(pid)
 }
 
 // gracefulTerminate sends SIGTERM for graceful shutdown on Unix.

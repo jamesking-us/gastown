@@ -34,13 +34,25 @@ func TestProxy_LargeMessageHandling(t *testing.T) {
 		p.stdin = stdinReader
 		p.agentStdin = agentStdinWriter
 
-		// Start a dummy process so isProcessAlive() returns true
+		// Start a dummy process so isProcessAlive() returns true. It needs an
+		// open stdin: with none, `cat` reads immediate EOF from /dev/null and
+		// exits right away, becoming a zombie (not reaped, since only Kill()
+		// is deferred below) for the rest of the test — which an
+		// isProcessAlive() that doesn't check for zombies would still
+		// misreport as alive. Feeding it a pipe we hold open keeps it
+		// genuinely running for the test's duration.
 		ctx := context.Background()
 		p.cmd = exec.CommandContext(ctx, "cat")
+		dummyStdinReader, dummyStdinWriter, _ := os.Pipe()
+		p.cmd.Stdin = dummyStdinReader
 		if err := p.cmd.Start(); err != nil {
 			t.Fatalf("failed to start dummy process: %v", err)
 		}
-		defer p.cmd.Process.Kill()
+		defer func() {
+			_ = dummyStdinWriter.Close()
+			_ = p.cmd.Process.Kill()
+			_ = p.cmd.Wait()
+		}()
 
 		p.wg.Add(1)
 		go p.forwardToAgent()

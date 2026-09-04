@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -22,14 +23,14 @@ func (p *Proxy) setupProcessGroup() {
 	util.SetProcessGroup(p.cmd)
 }
 
-// isProcessAlive checks if the agent process is still running.
-// On Unix, we use signal 0 to check process liveness.
+// isProcessAlive checks if the agent process is still running (and not a
+// zombie awaiting reap — see internal/procutil for why a bare signal-0
+// check is not enough).
 func (p *Proxy) isProcessAlive() bool {
-	if p.cmd == nil || p.cmd.Process == nil {
+	if p.cmd == nil {
 		return false
 	}
-	err := p.cmd.Process.Signal(syscall.Signal(0))
-	return err == nil
+	return procutil.IsProcessAlive(p.cmd.Process)
 }
 
 // terminateProcess gracefully terminates the agent process.
