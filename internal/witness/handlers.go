@@ -1323,16 +1323,45 @@ func extractPolecatFromJSON(output string) string {
 // Used by the witness instead of NukePolecat when a polecat is stuck, hung, or
 // has a dead agent process but still has work worth preserving (gt-dsgp).
 //
+// hookBead is the polecat's currently hooked bead, if any (empty if none).
+// It is passed through to the reassigned-work interlock (cl-3df) below; every
+// caller must supply it rather than restarting blind.
+//
 // The restart flow:
-//  1. Kill the existing tmux session (if alive)
-//  2. Start a fresh session via `gt session restart`
-//  3. The new session picks up the polecat's existing hook and continues
-func RestartPolecatSession(workDir, rigName, polecatName string) error {
+//  1. Check the reassigned-work interlock (cl-3df) — refuse if a shutdown for
+//     this polecat is still pending review, or if hookBead's current assignee
+//     is no longer this polecat.
+//  2. Kill the existing tmux session (if alive)
+//  3. Start a fresh session via `gt session restart`
+//  4. The new session picks up the polecat's existing hook and continues
+func RestartPolecatSession(bd *BdCli, workDir, rigName, polecatName, hookBead string) error {
+	if decision := checkRestartInterlock(bd, workDir, rigName, polecatName, hookBead); decision.Blocked {
+		return &RestartBlockedError{Reason: decision.Reason, Detail: decision.Detail}
+	}
+
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 	if err := util.ExecRun(workDir, "gt", "session", "restart", address, "--force"); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)
 	}
 	return nil
+}
+
+// applyRestartResult records the outcome of a RestartPolecatSession call onto
+// zombie. A blocked restart (cl-3df interlock) is reported distinctly from a
+// technical failure — it is the witness correctly declining a hazardous
+// restart, not a malfunction — so callers can tell the two apart in patrol
+// output without inspecting the error text.
+func applyRestartResult(zombie *ZombieResult, err error, failedAction string) {
+	if err == nil {
+		return
+	}
+	zombie.Error = err
+	var blocked *RestartBlockedError
+	if errors.As(err, &blocked) {
+		zombie.Action = fmt.Sprintf("restart-blocked-%s: %s", blocked.Reason, blocked.Detail)
+		return
+	}
+	zombie.Action = fmt.Sprintf("%s: %v", failedAction, err)
 }
 
 // NukePolecat executes the actual nuke operation for a polecat.
@@ -1807,10 +1836,8 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
-			zombie.Error = err
-			zombie.Action = fmt.Sprintf("restart-stuck-session-failed: %v", err)
-		}
+		err := RestartPolecatSession(bd, workDir, rigName, polecatName, snapHook)
+		applyRestartResult(&zombie, err, "restart-stuck-session-failed")
 		return zombie, true
 	}
 
@@ -1830,10 +1857,8 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
-			zombie.Error = err
-			zombie.Action = fmt.Sprintf("restart-agent-dead-session-failed: %v", err)
-		}
+		err := RestartPolecatSession(bd, workDir, rigName, polecatName, snapHook)
+		applyRestartResult(&zombie, err, "restart-agent-dead-session-failed")
 		return zombie, true
 	}
 
@@ -1854,10 +1879,8 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
-			zombie.Error = err
-			zombie.Action = fmt.Sprintf("restart-bead-closed-failed: %v", err)
-		}
+		err := RestartPolecatSession(bd, workDir, rigName, polecatName, snapHook)
+		applyRestartResult(&zombie, err, "restart-bead-closed-failed")
 		return zombie, true
 	}
 
@@ -2036,10 +2059,8 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			WasActive:      true,
 			Action:         fmt.Sprintf("restarted (done-intent age=%v, type=%s)", age.Round(time.Second), doneIntent.ExitType),
 		}
-		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
-			zombie.Error = err
-			zombie.Action = fmt.Sprintf("restart-failed (done-intent): %v", err)
-		}
+		err := RestartPolecatSession(bd, workDir, rigName, polecatName, snapHook)
+		applyRestartResult(&zombie, err, "restart-failed (done-intent)")
 		return zombie, true
 	}
 
@@ -2218,13 +2239,18 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	}
 
 	// Restart regardless of cleanup state — the worktree is preserved.
-	if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
+	if err := RestartPolecatSession(bd, workDir, rigName, polecatName, hookBead); err != nil {
 		if zombie.Error == nil {
-			zombie.Error = fmt.Errorf("restart: %w", err)
+			zombie.Error = err
 		} else {
 			zombie.Error = fmt.Errorf("%w; also restart: %v", zombie.Error, err)
 		}
-		if zombie.Action == "restarted" {
+		var blocked *RestartBlockedError
+		if errors.As(err, &blocked) {
+			// A blocked restart is a deliberate refusal, not a technical failure —
+			// always surface it, even if a dirty-state tracking action was already set.
+			zombie.Action = fmt.Sprintf("restart-blocked-%s: %s", blocked.Reason, blocked.Detail)
+		} else if zombie.Action == "restarted" {
 			zombie.Action = fmt.Sprintf("restart-failed: %v", err)
 		}
 	}
