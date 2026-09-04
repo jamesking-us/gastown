@@ -27,6 +27,32 @@ section() { echo -e "\n${BLUE}${BOLD}=== $1 ===${NC}\n"; }
 pass()    { echo -e "  ${GREEN}[PASS]${NC} $1"; PASSES=$((PASSES + 1)); }
 fail_check() { echo -e "  ${RED}[FAIL]${NC} $1"; FAILURES=$((FAILURES + 1)); FAIL_DETAILS+=("$1"); }
 
+# process_matches_pattern reports whether any live, non-zombie process other
+# than this script itself matches PATTERN (via `pgrep -f`).
+#
+# `pgrep -f PATTERN` matches against every process's full command line,
+# including this script's own (`bash .../vm-integration-test.sh ...`) and any
+# wrapper it runs under, plus zombies (already exited, not yet reaped, still
+# answer as an existing PID). A single unguarded `pgrep -f` check is exactly
+# the shape that let five polecat monitor loops match their own wrapper
+# command and never observe "no matches" (cl-d77p) — this script's checks are
+# one-shot, not loops, but centralizing the guard here keeps that failure
+# mode from being copy-pasted into a future loop.
+process_matches_pattern() {
+    local pattern="$1"
+    local pid stat
+    local self=$$
+    local parent=$PPID
+    local matched=1
+    while IFS= read -r pid; do
+        [[ -z "$pid" || "$pid" == "$self" || "$pid" == "$parent" ]] && continue
+        stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+        [[ "$stat" == Z* ]] && continue
+        matched=0
+    done < <(pgrep -f "$pattern" || true)
+    return "$matched"
+}
+
 TOWN_ROOT="${1:?Usage: vm-integration-test.sh <town_root>}"
 TOWN_ROOT=$(cd "$TOWN_ROOT" && pwd)  # Absolute path
 DOLT_DATA_DIR="/workspace/dolt-server"
@@ -157,7 +183,7 @@ kill_all_processes() {
     stop_dolt_server
 
     # Verify no processes remain
-    if pgrep -f "bd daemon" >/dev/null 2>&1; then
+    if process_matches_pattern "bd daemon"; then
         warn "bd daemon still running after kill"
     fi
 }
@@ -302,9 +328,9 @@ verify_zero_artifacts() {
     log "Verifying zero artifacts for: $test_name"
 
     # Check 1: No bd daemons running
-    if pgrep -f "bd daemon" >/dev/null 2>&1; then
+    if process_matches_pattern "bd daemon"; then
         fail_check "$test_name: bd daemon still running"
-    elif pgrep -f "bd sync" >/dev/null 2>&1; then
+    elif process_matches_pattern "bd sync"; then
         fail_check "$test_name: bd sync still running"
     else
         pass "$test_name: no bd daemons"

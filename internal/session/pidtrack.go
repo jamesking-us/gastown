@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -115,16 +116,15 @@ func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
 		}
 		pid := record.PID
 
-		// Check if process is still alive
-		proc, err := os.FindProcess(pid)
-		if err != nil {
+		// Check if process is still alive (and not a zombie awaiting reap —
+		// see internal/procutil for why a bare signal-0 check is not enough).
+		if !procutil.IsAlive(pid) {
+			// Process is already dead — clean up PID file
 			_ = os.Remove(path)
 			continue
 		}
-
-		// Signal 0 checks existence without killing
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			// Process is already dead — clean up PID file
+		proc, err := os.FindProcess(pid)
+		if err != nil {
 			_ = os.Remove(path)
 			continue
 		}

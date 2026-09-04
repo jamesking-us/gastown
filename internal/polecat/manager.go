@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -22,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -2179,15 +2179,9 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 		// Got a non-numeric PID — shouldn't happen, but don't kill.
 		return false
 	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return true
-	}
-	// On Unix, Signal(0) checks if process exists without sending a signal
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return true
-	}
-	return false
+	// procutil.IsAlive also rejects a zombie (defunct) process, which a bare
+	// Signal(0) check would misreport as alive (cl-d77p).
+	return !procutil.IsAlive(pid)
 }
 
 var sessionAgentAlive = func(t *tmux.Tmux, sessionName string) (bool, error) {

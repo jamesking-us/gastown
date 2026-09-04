@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 // ActivateAgentLogging spawns a detached `gt agent-log` process to stream the
@@ -113,11 +115,12 @@ func killPreviousAgentLogger(pidFile string) {
 	}
 	_ = proc.Signal(syscall.SIGTERM)
 	// Wait briefly for the process to exit to avoid overlapping watchers
-	// emitting duplicate events. Signal(0) returns an error once the process
-	// has exited (ESRCH on Linux/macOS).
+	// emitting duplicate events. procutil.IsAlive also treats a zombie as
+	// exited, so this doesn't burn the full deadline waiting on a process
+	// that already finished but hasn't been reaped yet.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
+		if !procutil.IsAlive(pid) {
 			break // process has exited
 		}
 		time.Sleep(50 * time.Millisecond)

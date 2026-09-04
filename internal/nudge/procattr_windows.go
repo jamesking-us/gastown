@@ -5,6 +5,8 @@ package nudge
 import (
 	"os"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 // detachedProcAttr returns SysProcAttr for Windows.
@@ -17,16 +19,8 @@ func detachedProcAttr() *syscall.SysProcAttr {
 }
 
 // isProcessAlive checks if a process is running on Windows.
-// Uses syscall.OpenProcess directly (no x/sys/windows dependency) for
-// maximum CI compatibility. If we can open the process handle, it's alive.
 func isProcessAlive(proc *os.Process) bool {
-	const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-	h, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(proc.Pid))
-	if err != nil {
-		return false // can't open → not running (or access denied)
-	}
-	syscall.CloseHandle(h)
-	return true
+	return procutil.IsProcessAlive(proc)
 }
 
 // terminateProcess kills the process on Windows (no graceful SIGTERM).

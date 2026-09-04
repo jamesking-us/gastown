@@ -103,6 +103,23 @@ and no token movement. Confirm with `ps -eo etimes,args`. Beware self-matching
 poll patterns: a `pgrep` pattern that matches the polling command itself can
 never return empty (cl-d77p).
 
+**Prefer a pid you already hold over a pattern search.** `until ! kill -0
+$PID; do sleep N; done` cannot self-match — the check names an integer, not a
+pattern that can also describe the checker's own command line. `until ! pgrep
+-f "PATTERN"; do sleep N; done` embeds PATTERN inside its own `bash -c`
+argument, so if PATTERN also describes that wrapper, the loop matches itself
+and never terminates. Five monitor loops did exactly this to each other on
+2026-09-03 (chrome, cl-st8u): unbounded, mutually self-sustaining, 40 minutes
+lost. The same shape produces the opposite failure in a health check rather
+than a wait: `pgrep -f "gt nudge-poller hq-deacon"` run to verify that poller
+matched the *verifying* shell's own command line and read a dead poller as
+healthy (boot, hq-d16k) — a false all-clear instead of a hang, from the same
+defect. If a pattern search is unavoidable, exclude the checker's own PID and
+its parent's, and don't trust a bare hit: `kill -0`/`Signal(0)` also succeeds
+against a zombie (exited, not yet reaped) process, so confirm the candidate's
+`ps -o stat=` isn't `Z` before believing it. `internal/procutil` centralizes
+both guards (`IsAlive`, `FindByPattern`) for any Go call site that needs one.
+
 ## Co-timing dominates all of them
 
 Before diagnosing several quiet agents one at a time, ask whether they stopped
