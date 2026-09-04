@@ -674,7 +674,7 @@ func (m *Manager) Add(name string) (*Polecat, error) {
 // This eliminates the TOCTOU race between AllocateName and AddWithOptions
 // (GH#2215) by holding the pool lock through directory creation, ensuring
 // no concurrent process can allocate the same name.
-func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
+func (m *Manager) AllocateAndAdd(opts AddOptions) (allocName string, result *Polecat, retErr error) {
 	// Hold pool lock across allocation + directory creation to close the
 	// race window where a concurrent AllocateName could miss the pending
 	// marker and reallocate the same name.
@@ -702,6 +702,22 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 		_ = poolLock.Unlock()
 		return "", nil, err
 	}
+
+	// cl-30m: claim the name before releasing the pool lock. If a concurrent
+	// FindIdlePolecat/ReuseIdlePolecat is (incorrectly, on a stale beads
+	// read) treating this same name as an idle, reusable slot, it will block
+	// on lockPolecat(name) and then see this claim once it wakes — instead
+	// of clobbering the polecat this call is about to create.
+	if err := m.writeClaim(name, opts.HookBead); err != nil {
+		_ = polecatLock.Unlock()
+		_ = poolLock.Unlock()
+		return "", nil, fmt.Errorf("claiming polecat slot: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			m.clearClaim(name)
+		}
+	}()
 
 	// Create polecat directory while holding both locks
 	polecatDir := m.polecatDir(name)
@@ -1769,7 +1785,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 //  3. Create fresh branch: git checkout -b <branch> <startPoint>
 //  4. Reset agent bead and set hook_bead atomically
 //  5. Return polecat in working state
-func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, error) {
+func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (result *Polecat, retErr error) {
 	// Acquire per-polecat file lock to prevent concurrent reuse/remove races
 	fl, err := m.lockPolecat(name)
 	if err != nil {
@@ -1780,6 +1796,17 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
 	}
+
+	// cl-30m: a beads-backed reusability read can still say "idle" for a
+	// slot that another process just finished reusing — the work bead
+	// itself isn't marked hooked until later, by the sling caller. Check
+	// the local claim marker first so a losing concurrent reuse fails
+	// closed instead of clobbering the winner's branch/hook_bead.
+	if claim := m.activeClaim(name); claim != nil && claim.HookBead != opts.HookBead {
+		return nil, fmt.Errorf("%w: slot claimed for %s at %s (pid %d)",
+			ErrPolecatNeedsRecovery, claim.HookBead, claim.ClaimedAt.Format(time.RFC3339), claim.PID)
+	}
+
 	current, err := m.loadFromBeads(name)
 	if err != nil {
 		return nil, err
@@ -1801,6 +1828,22 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
 		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
 	}
+
+	// Claim the slot now, still under the per-polecat lock, so any concurrent
+	// process reading beads state for this name (FindIdlePolecat or another
+	// ReuseIdlePolecat waiting on this same lock) sees it as taken even
+	// before the work bead is marked hooked by the sling caller.
+	if err := m.writeClaim(name, opts.HookBead); err != nil {
+		return nil, fmt.Errorf("claiming polecat slot: %w", err)
+	}
+	// Release the claim early on any failure below so a botched reuse
+	// doesn't strand the slot as unreusable for the full claim TTL — a
+	// subsequent recovery/reallocation attempt should see it as idle again.
+	defer func() {
+		if retErr != nil {
+			m.clearClaim(name)
+		}
+	}()
 
 	// Get worktree path (must already exist for reuse)
 	clonePath := m.clonePath(name)
@@ -2304,7 +2347,10 @@ func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 		return nil, err
 	}
 	for _, p := range polecats {
-		if p.State == StateIdle && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
+		if p.State != StateIdle || m.activeClaim(p.Name) != nil {
+			continue
+		}
+		if m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
 			return p, nil
 		}
 	}
@@ -2603,6 +2649,12 @@ func (m *Manager) SetState(name string, state State) error {
 
 	switch state {
 	case StateWorking:
+		// The work bead is confirmed hooked by now (sling sets that before
+		// starting the session), so hookBeadSafeForWorkstate's own check is
+		// sufficient going forward — the cl-30m claim marker has done its
+		// job of covering the window before that hook write landed.
+		m.clearClaim(name)
+
 		// Set issue to in_progress if there is one.
 		// Skip if status is "hooked" — sling sets this, and changing it here causes
 		// merge conflicts when gt done runs. The polecat should claim work via gt prime,

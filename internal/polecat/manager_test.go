@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1574,6 +1575,81 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "setup" {
 		t.Fatalf("reuse setup marker = %q, want setup", got)
+	}
+}
+
+// TestReuseIdlePolecat_ConcurrentReuseDoesNotClobber is the regression test
+// for cl-30m: two concurrent slings resolving to the same idle polecat, where
+// the second silently clobbered the first's branch/hook_bead with no error
+// surfaced to either caller.
+//
+// The per-polecat lock alone does not close this gap: beads is the source of
+// truth for "is this slot idle", and the slot still reads back as idle to a
+// waiting caller until the *work* bead is separately marked hooked by the
+// sling caller (outside this function). Without the cl-30m claim marker, a
+// caller unblocked by the lock re-reads that stale-idle state and reuses the
+// same polecat a second time. This test exercises that exact sequence
+// directly against the Manager.
+func TestReuseIdlePolecat_ConcurrentReuseDoesNotClobber(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	if _, err := mgr.AddWithOptions("toast", AddOptions{}); err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	if err := git.NewGit(mgr.clonePath("toast")).CleanForce(); err != nil {
+		t.Fatalf("CleanForce: %v", err)
+	}
+
+	const concurrency = 8
+	type outcome struct {
+		bead   string
+		branch string
+		err    error
+	}
+	results := make(chan outcome, concurrency)
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		bead := fmt.Sprintf("gt-race-%d", i)
+		wg.Add(1)
+		go func(bead string) {
+			defer wg.Done()
+			reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: bead})
+			o := outcome{bead: bead, err: err}
+			if err == nil && reused != nil {
+				o.branch = reused.Branch
+			}
+			results <- o
+		}(bead)
+	}
+	wg.Wait()
+	close(results)
+
+	var winners []outcome
+	for o := range results {
+		if o.err == nil {
+			winners = append(winners, o)
+		} else if !errors.Is(o.err, ErrPolecatNeedsRecovery) {
+			t.Errorf("bead %s: unexpected error type: %v", o.bead, o.err)
+		}
+	}
+
+	if len(winners) != 1 {
+		names := make([]string, len(winners))
+		for i, w := range winners {
+			names[i] = w.bead
+		}
+		t.Fatalf("expected exactly 1 winning reuse of the single idle polecat, got %d: %v (cl-30m clobber)", len(winners), names)
+	}
+
+	// The worktree must be left on the winner's branch — a clobbering loser
+	// would have re-checked-out a different branch after the winner returned.
+	actualBranch, err := git.NewGit(mgr.clonePath("toast")).CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if actualBranch != winners[0].branch {
+		t.Fatalf("worktree branch = %q, want winner's branch %q (clobbered post-hoc)", actualBranch, winners[0].branch)
 	}
 }
 
