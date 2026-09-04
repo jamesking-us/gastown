@@ -550,6 +550,17 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
 	}
 
+	// Step 2.5: Ancestry/staleness guard (cl-046). A clean merge-tree is not
+	// proof of safety on its own: a stale branch whose changed files don't
+	// overlap what landed on target since it forked merges cleanly with no
+	// conflict and no signal. Before attempting the merge, check whether a
+	// stale branch's content has already reached target under a different
+	// SHA (rebase or squash landed elsewhere) so we skip the redundant merge
+	// instead of silently duplicating or reintroducing it.
+	if skip, guardResult := e.checkAlreadyLanded(mr, mergeRef, target); skip {
+		return guardResult
+	}
+
 	// Step 3: Check for merge conflicts (using local branch)
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking for conflicts...\n")
 	conflicts, err := e.git.CheckConflicts(mergeRef, target)
@@ -981,6 +992,39 @@ func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string) ProcessRes
 
 func (e *Engineer) isSyntheticMergeMechanicsMR(mr *MRInfo) bool {
 	return e.testAllowSyntheticMRs && mr != nil && strings.HasPrefix(strings.TrimSpace(mr.ID), "mr-") && strings.TrimSpace(mr.SourceIssue) == ""
+}
+
+// checkAlreadyLanded measures how far mergeRef is behind target and, only
+// when it is genuinely stale, checks whether its content already reached
+// target under a different SHA — via ancestry, or via combined-diff patch-id
+// for the rebased/squashed case (see cl-0r5's merge-proof mechanism, which
+// this reuses). A branch that is up to date has nothing to prove and this is
+// a no-op; a stale branch whose content has not landed yet is not blocked
+// here either — git's own merge correctly integrates divergent history, and
+// this guard exists only to stop a redundant re-merge of work that is
+// already on target.
+func (e *Engineer) checkAlreadyLanded(mr *MRInfo, mergeRef, target string) (skip bool, result ProcessResult) {
+	behind, err := e.git.CommitsAhead(mergeRef, target)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not measure %s vs %s staleness: %v (continuing)\n", mr.Branch, target, err)
+		return false, ProcessResult{}
+	}
+	if behind == 0 {
+		return false, ProcessResult{}
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] %s is behind %s by %d commit(s); checking whether it already landed...\n", mr.Branch, target, behind)
+
+	if ancestor, ancErr := e.git.IsAncestor(mergeRef, target); ancErr == nil && ancestor {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] %s is already an ancestor of %s — already landed\n", mr.Branch, target)
+		return true, e.rejectMRBeforeMerge(mr, fmt.Sprintf("already landed on %s (ancestor)", target))
+	}
+	if proof, proofErr := e.git.ProveLandedByPatchID(mergeRef, target); proofErr == nil && proof != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] %s already landed on %s: %s\n", mr.Branch, target, proof.Describe())
+		return true, e.rejectMRBeforeMerge(mr, fmt.Sprintf("already landed on %s: %s", target, proof.Describe()))
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] %s is behind %s by %d commit(s) but not yet landed; proceeding with merge\n", mr.Branch, target, behind)
+	return false, ProcessResult{}
 }
 
 func (e *Engineer) rejectMRBeforeMerge(mr *MRInfo, reason string) ProcessResult {
