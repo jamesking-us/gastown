@@ -355,6 +355,82 @@ func TestListMergeRequestsFiltersRigBeforeHydration(t *testing.T) {
 	}
 }
 
+// TestListMergeRequestsSurfacesRowBDListOmits is the cl-339f regression: a
+// held-open MR bead can be OPEN in the store (visible to bd show, bd query,
+// and direct SQL) while bd list's listing surface silently omits it. This
+// must not translate into gt mq list / gt mq next losing the row — it has to
+// be unioned in from a direct SQL read of the issues table.
+func TestListMergeRequestsSurfacesRowBDListOmits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	installListMergeRequestsBDListOmitsRowStub(t)
+
+	b := New(t.TempDir())
+	issues, err := b.ListMergeRequests(ListOptions{Label: "gt:merge-request", Status: "open", Priority: -1, Rig: "gastown"})
+	if err != nil {
+		t.Fatalf("ListMergeRequests() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-wisp-nh82" {
+		t.Fatalf("ListMergeRequests() = %#v, want the held MR bd list omitted (gt-wisp-nh82)", issues)
+	}
+	if issues[0].Status != "open" {
+		t.Fatalf("issue Status = %q, want open", issues[0].Status)
+	}
+}
+
+func installListMergeRequestsBDListOmitsRowStub(t *testing.T) {
+	t.Helper()
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(ResetBdAllowStaleCacheForTest)
+
+	binDir := t.TempDir()
+	// "list" models the observed cl-339f defect: bd list's listing surface
+	// returns nothing even though the row is open in the store. "sql" against
+	// FROM issues models the direct, authoritative read that still sees it —
+	// this is the promoted (permanent), not ephemeral, case. "sql" against
+	// FROM wisps returns nothing since the bead has already been promoted
+	// out of the wisps table.
+	script := `#!/bin/sh
+if [ "${1:-}" = "--allow-stale" ]; then
+  if [ "${2:-}" = "version" ]; then
+    echo "Error: unknown flag: --allow-stale" >&2
+    exit 0
+  fi
+  shift
+fi
+case "${1:-}" in
+  list)
+    printf '%s\n' '[]'
+    exit 0
+    ;;
+  sql)
+    case "$*" in
+      *"FROM issues"*)
+        printf '%s\n' '[{"id":"gt-wisp-nh82","title":"Merge: gt-hio","description":"branch: polecat/crater/gt-hio@abc\ntarget: main\nsource_issue: gt-hio\nrig: gastown\n","status":"open","priority":1,"assignee":"","created_at":"2026-09-02T04:00:00Z","updated_at":"2026-09-02T04:25:00Z","created_by":"tester","labels_csv":"gt:merge-request"}]'
+        ;;
+      *)
+        printf '%s\n' '[]'
+        ;;
+    esac
+    exit 0
+    ;;
+  show)
+    printf '%s\n' '[{"id":"gt-wisp-nh82","title":"Merge: gt-hio","description":"branch: polecat/crater/gt-hio@abc\ntarget: main\nsource_issue: gt-hio\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-09-02T04:00:00Z","updated_at":"2026-09-02T04:25:00Z","ephemeral":false,"labels":["gt:merge-request"]}]'
+    exit 0
+    ;;
+  *)
+    printf '%s\n' '[]'
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func installListMergeRequestsBDStub(t *testing.T, failShow bool) {
 	t.Helper()
 	ResetBdAllowStaleCacheForTest()

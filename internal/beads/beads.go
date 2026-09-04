@@ -1278,9 +1278,17 @@ func isJSONBytes(b []byte) bool {
 
 // ListMergeRequests returns merge-request beads from both the issues table
 // and the wisps table. MRs are created as ephemeral (wisps) by gt mq submit,
-// but bd list only queries the issues table. This method queries the wisps
-// table via bd sql --json, then hydrates each MR with bd show detail so
-// dependency readiness fields are consistent for display and selection.
+// but bd list only queries the issues table.
+//
+// bd list is NOT trusted as the sole source for either table: it has been
+// observed (cl-339f) to silently omit a row that is simultaneously OPEN via
+// bd show, bd query, and direct SQL — a stale listing/materialization path,
+// not a data-loss in the store itself. So both the issues table and the
+// wisps table are additionally read authoritatively via bd sql --json
+// (a direct table read, not the listing surface that was seen to lie), and
+// any row bd list missed is unioned in by ID. A held-open MR must appear
+// here regardless of which surface bd list's listing index currently
+// reflects.
 func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 	// 1. Query issues table (bd list) — don't use Ephemeral since bd query
 	// can't parse colons in label values like "gt:merge-request".
@@ -1296,71 +1304,131 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 		seen[issue.ID] = true
 	}
 
-	// 2. Query wisps table via SQL for merge-request wisps with full data
-	statusFilter := "w.status = 'open'"
-	if opts.Status != "" && strings.EqualFold(opts.Status, "all") {
-		statusFilter = "1=1"
-	} else if opts.Status != "" {
-		statusFilter = fmt.Sprintf("w.status = '%s'", strings.ReplaceAll(strings.ToLower(opts.Status), "'", "''"))
-	}
-
-	labelFilter := "l.label = 'gt:merge-request'"
-	if opts.Label != "" {
-		labelFilter = fmt.Sprintf("l.label = '%s'", strings.ReplaceAll(opts.Label, "'", "''"))
-	}
-
-	query := fmt.Sprintf(
-		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, "+
-			"w.created_at, w.updated_at, w.created_by, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
-			"FROM wisps w "+
-			"JOIN wisp_labels l ON w.id = l.issue_id "+
-			"LEFT JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE %s AND %s "+
-			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, w.created_by",
-		labelFilter, statusFilter)
-
-	sqlOut, sqlErr := b.run("sql", "--json", query)
-	if sqlErr == nil && len(sqlOut) > 0 && isJSONBytes(sqlOut) {
-		var rows []struct {
-			ID          string `json:"id"`
-			Title       string `json:"title"`
-			Description string `json:"description"`
-			Status      string `json:"status"`
-			Priority    int    `json:"priority"`
-			Assignee    string `json:"assignee"`
-			CreatedAt   string `json:"created_at"`
-			UpdatedAt   string `json:"updated_at"`
-			CreatedBy   string `json:"created_by"`
-			LabelsCSV   string `json:"labels_csv"`
+	statusFilter := func(alias string) string {
+		if opts.Status != "" && strings.EqualFold(opts.Status, "all") {
+			return "1=1"
 		}
-		if jsonErr := json.Unmarshal(sqlOut, &rows); jsonErr == nil {
-			for _, row := range rows {
-				if seen[row.ID] {
-					continue
-				}
-				issue := &Issue{
-					ID:          row.ID,
-					Title:       row.Title,
-					Description: row.Description,
-					Status:      row.Status,
-					Priority:    row.Priority,
-					Assignee:    row.Assignee,
-					CreatedAt:   row.CreatedAt,
-					UpdatedAt:   row.UpdatedAt,
-					CreatedBy:   row.CreatedBy,
-					Ephemeral:   true,
-				}
-				if row.LabelsCSV != "" {
-					issue.Labels = strings.Split(row.LabelsCSV, ",")
-				}
-				issueResults = append(issueResults, issue)
+		if opts.Status != "" {
+			return fmt.Sprintf("%s.status = '%s'", alias, strings.ReplaceAll(strings.ToLower(opts.Status), "'", "''"))
+		}
+		return fmt.Sprintf("%s.status = 'open'", alias)
+	}
+
+	labelFilter := func(alias string) string {
+		label := "gt:merge-request"
+		if opts.Label != "" {
+			label = opts.Label
+		}
+		return fmt.Sprintf("%s.label = '%s'", alias, strings.ReplaceAll(label, "'", "''"))
+	}
+
+	// 2. Read the issues table directly via SQL — the authoritative source
+	// for permanent (promoted) MR beads, bypassing whatever cache/index
+	// backs bd list's listing surface. Any row present here but missing
+	// from step 1 is the cl-339f signature and is unioned in.
+	issuesRows, issuesErr := b.queryMRTableSQL("issues", "labels", statusFilter("i"), labelFilter("l"), false)
+	if issuesErr == nil {
+		for _, issue := range issuesRows {
+			if seen[issue.ID] {
+				continue
 			}
+			seen[issue.ID] = true
+			issueResults = append(issueResults, issue)
+		}
+	}
+
+	// 3. Query wisps table via SQL for merge-request wisps with full data —
+	// MRs are ephemeral by design (see gt-t5t6y) and bd list only searches
+	// the issues table, so this is the only way to see them at all, not
+	// just the authoritative one.
+	wispRows, wispErr := b.queryMRTableSQL("wisps", "wisp_labels", statusFilter("w"), labelFilter("l"), true)
+	if wispErr == nil {
+		for _, issue := range wispRows {
+			if seen[issue.ID] {
+				continue
+			}
+			seen[issue.ID] = true
+			issueResults = append(issueResults, issue)
 		}
 	}
 
 	issueResults = filterMergeRequestsByRig(issueResults, opts.Rig)
 	return b.hydrateMergeRequestDetails(issueResults)
+}
+
+// queryMRTableSQL reads merge-request rows directly out of tableName (either
+// "issues" or "wisps") via bd sql --json, joining labelTable ("labels" or
+// "wisp_labels" respectively) to filter by label and collect the full label
+// set. This is a direct table read rather than a listing/index surface, used
+// because bd list has been observed to silently omit open rows that direct
+// SQL and bd show both agree are present (cl-339f). Errors are returned
+// (not swallowed here) so a caller can distinguish "queried, zero rows" from
+// "query failed"; ListMergeRequests currently treats a failure here as
+// best-effort — it falls back to whatever bd list already found rather than
+// failing the whole listing over a transient bd sql error.
+func (b *Beads) queryMRTableSQL(tableName, labelTable, statusFilter, labelFilter string, ephemeral bool) ([]*Issue, error) {
+	alias := "w"
+	if tableName == "issues" {
+		alias = "i"
+	}
+
+	query := fmt.Sprintf(
+		"SELECT %[1]s.id, %[1]s.title, %[1]s.description, %[1]s.status, %[1]s.priority, %[1]s.assignee, "+
+			"%[1]s.created_at, %[1]s.updated_at, %[1]s.created_by, "+
+			"GROUP_CONCAT(al.label) as labels_csv "+
+			"FROM %[2]s %[1]s "+
+			"JOIN %[3]s l ON %[1]s.id = l.issue_id "+
+			"LEFT JOIN %[3]s al ON %[1]s.id = al.issue_id "+
+			"WHERE %[4]s AND %[5]s "+
+			"GROUP BY %[1]s.id, %[1]s.title, %[1]s.description, %[1]s.status, %[1]s.priority, %[1]s.assignee, %[1]s.created_at, %[1]s.updated_at, %[1]s.created_by",
+		alias, tableName, labelTable, statusFilter, labelFilter)
+
+	sqlOut, sqlErr := b.run("sql", "--json", query)
+	if sqlErr != nil {
+		return nil, sqlErr
+	}
+	if len(sqlOut) == 0 || !isJSONBytes(sqlOut) {
+		// bd sql prints plain text (e.g. "No rows.") instead of JSON when
+		// empty — not an error, just no rows.
+		return nil, nil
+	}
+
+	var rows []struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"`
+		Priority    int    `json:"priority"`
+		Assignee    string `json:"assignee"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		CreatedBy   string `json:"created_by"`
+		LabelsCSV   string `json:"labels_csv"`
+	}
+	if jsonErr := json.Unmarshal(sqlOut, &rows); jsonErr != nil {
+		return nil, fmt.Errorf("parsing bd sql output for %s: %w", tableName, jsonErr)
+	}
+
+	issues := make([]*Issue, 0, len(rows))
+	for _, row := range rows {
+		issue := &Issue{
+			ID:          row.ID,
+			Title:       row.Title,
+			Description: row.Description,
+			Status:      row.Status,
+			Priority:    row.Priority,
+			Assignee:    row.Assignee,
+			CreatedAt:   row.CreatedAt,
+			UpdatedAt:   row.UpdatedAt,
+			CreatedBy:   row.CreatedBy,
+			Ephemeral:   ephemeral,
+		}
+		if row.LabelsCSV != "" {
+			issue.Labels = strings.Split(row.LabelsCSV, ",")
+		}
+		issues = append(issues, issue)
+	}
+	return issues, nil
 }
 
 func filterMergeRequestsByRig(issues []*Issue, rigName string) []*Issue {
