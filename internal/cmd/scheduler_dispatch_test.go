@@ -168,12 +168,16 @@ func setupSchedulerPartialScanTown(t *testing.T, workBeadID string) string {
 	}
 	contextJSON := fmt.Sprintf(`[{"id":"ctx-healthy","title":"sling-context: %s","status":"open","description":%s}]`,
 		workBeadID, strconv.Quote(beads.FormatSlingContextDescription(fields)))
+	// Only the context listing fails in the rig dir; work-bead lookups stay
+	// healthy so the test isolates the walk's tolerance, not bd routing.
 	installFakeBD(t, `#!/bin/sh
-case "$BEADS_DIR" in
-  */rig/.beads) echo "issue not found" >&2; exit 1 ;;
-esac
 case "$1" in
-  query) printf '%s\n' '`+contextJSON+`' ;;
+  query)
+    case "$BEADS_DIR" in
+      */rig/.beads) echo "issue not found" >&2; exit 1 ;;
+    esac
+    printf '%s\n' '`+contextJSON+`'
+    ;;
   show)  printf '%s\n' '[{"id":"`+workBeadID+`","title":"work","status":"open","labels":[]}]' ;;
   *)     printf '[]\n' ;;
 esac

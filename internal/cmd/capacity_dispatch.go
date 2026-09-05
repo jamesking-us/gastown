@@ -424,11 +424,12 @@ func beadsForContextRecord(rec slingContextRecord) *beads.Beads {
 // cleanupStaleContexts closes invalid and stale sling context beads.
 // Called explicitly before the dispatch cycle to separate cleanup from querying.
 func cleanupStaleContexts(townRoot string) error {
-	contexts, failures, err := scanAllSlingContextRecords(townRoot)
+	// Scan failures are not reported here: the only caller reports the same
+	// failures a moment later, off the assessment walk.
+	contexts, _, err := scanAllSlingContextRecords(townRoot)
 	if err != nil {
 		return err
 	}
-	reportSlingContextScanFailures(failures)
 
 	// First pass: close invalid and circuit-broken contexts, collect work bead IDs
 	// that need status checks for stale detection.
@@ -824,8 +825,8 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 // listAllSlingContexts returns all open sling context beads across all rig
 // beads dirs. Sling contexts are created in the target rig's beads dir
 // (GH#3468), so we scan HQ plus all rig dirs.
-// Used by scheduler list/status/clear, cleanupStaleContexts, and areScheduled.
-// Does NOT filter by readiness or circuit breaker.
+// Fail-closed: used by areScheduled, where a partial view would let a bead be
+// scheduled twice. Does NOT filter by readiness or circuit breaker.
 //
 // Deduplicates by context ID: different search dirs can resolve to the same
 // underlying beads DB (e.g., when a rig's top-level .beads is a redirect to

@@ -423,7 +423,7 @@ func printSkippedContexts(failures []slingContextScanFailure) {
 	if len(failures) == 0 {
 		return
 	}
-	fmt.Printf("  %s %d unresolvable sling context(s), skipped:\n",
+	fmt.Printf("  %s  %d unresolvable sling context(s):\n",
 		style.Warning.Render("Skipped:"), len(failures))
 	for _, f := range failures {
 		fmt.Printf("    %s: %v\n", f.beadsDir, f.err)
