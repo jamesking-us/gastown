@@ -137,9 +137,12 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading scheduler state: %w", err)
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
+	scheduled, scanFailures, err := listScheduledBeads(townRoot)
 	if err != nil {
 		return fmt.Errorf("listing scheduled beads: %w", err)
+	}
+	if schedulerStatusJSON {
+		reportSlingContextScanFailures(scanFailures)
 	}
 
 	capacitySnapshot, err := polecatCapacitySnapshotForTown(townRoot)
@@ -157,6 +160,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
+			Skipped        []skippedContextInfo    `json:"skipped_contexts,omitempty"`
 		}{
 			Paused:         state.Paused,
 			PausedBy:       state.PausedBy,
@@ -165,6 +169,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			Capacity:       capacitySnapshot,
 			LastDispatchAt: state.LastDispatchAt,
 			Beads:          scheduled,
+			Skipped:        skippedContextInfos(scanFailures),
 		}
 		for _, b := range scheduled {
 			if !b.Blocked {
@@ -190,6 +195,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  State:    active\n")
 	}
 	fmt.Printf("  Scheduled: %d total, %d ready\n", len(scheduled), readyCount)
+	printSkippedContexts(scanFailures)
 	fmt.Printf("  Active:    %d polecats\n", capacitySnapshot.ActiveSessions)
 	if capacitySnapshot.Max > 0 {
 		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d, pending MR: %d)\n",
@@ -217,12 +223,13 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
+	scheduled, scanFailures, err := listScheduledBeads(townRoot)
 	if err != nil {
 		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
-
 	if schedulerListJSON {
+		// stdout stays pure JSON; skipped contexts are named on stderr.
+		reportSlingContextScanFailures(scanFailures)
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(scheduled)
@@ -230,6 +237,7 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 
 	if len(scheduled) == 0 {
 		fmt.Println("No beads scheduled.")
+		printSkippedContexts(scanFailures)
 		fmt.Println("Enable deferred dispatch with: gt config set scheduler.max_polecats <N>")
 		return nil
 	}
@@ -240,6 +248,7 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s (%d beads)\n\n", style.Bold.Render("Scheduled Work"), len(scheduled))
+	printSkippedContexts(scanFailures)
 	for rig, beads := range byRig {
 		fmt.Printf("  %s (%d):\n", style.Bold.Render(rig), len(beads))
 		for _, b := range beads {
@@ -376,15 +385,49 @@ func runSchedulerRun(cmd *cobra.Command, args []string) error {
 	return err
 }
 
-// listScheduledBeads returns info about all scheduled beads for display.
-// Reconciles sling context beads with work bead readiness to mark blocked status.
-// Uses batch fetch for work bead info to avoid N+1 subprocess spawns.
-func listScheduledBeads(townRoot string) ([]scheduledBeadInfo, error) {
-	assessments, err := assessScheduledContexts(townRoot)
+// listScheduledBeads returns info about all scheduled beads for display, plus
+// one entry per sling context that could not be resolved. Reconciles sling
+// context beads with work bead readiness to mark blocked status. Uses batch
+// fetch for work bead info to avoid N+1 subprocess spawns.
+//
+// An unresolvable context is skipped and reported, not fatal: `gt scheduler
+// status` is the gate every SLOT_OPEN dispatch trigger runs first, so aborting
+// the whole listing on one broken context dir would stop town-wide dispatch.
+func listScheduledBeads(townRoot string) ([]scheduledBeadInfo, []slingContextScanFailure, error) {
+	assessments, failures, err := assessScheduledContexts(townRoot)
 	if err != nil {
-		return nil, err
+		return nil, failures, err
 	}
-	return scheduledBeadInfosFromAssessments(assessments), nil
+	return scheduledBeadInfosFromAssessments(assessments), failures, nil
+}
+
+// skippedContextInfo reports one unresolvable sling context in --json output.
+type skippedContextInfo struct {
+	BeadsDir string `json:"beads_dir"`
+	Error    string `json:"error"`
+}
+
+func skippedContextInfos(failures []slingContextScanFailure) []skippedContextInfo {
+	if len(failures) == 0 {
+		return nil
+	}
+	out := make([]skippedContextInfo, 0, len(failures))
+	for _, f := range failures {
+		out = append(out, skippedContextInfo{BeadsDir: f.beadsDir, Error: f.err.Error()})
+	}
+	return out
+}
+
+// printSkippedContexts names each skipped sling context in human-readable output.
+func printSkippedContexts(failures []slingContextScanFailure) {
+	if len(failures) == 0 {
+		return
+	}
+	fmt.Printf("  %s %d unresolvable sling context(s), skipped:\n",
+		style.Warning.Render("Skipped:"), len(failures))
+	for _, f := range failures {
+		fmt.Printf("    %s: %v\n", f.beadsDir, f.err)
+	}
 }
 
 func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment) []scheduledBeadInfo {
