@@ -109,14 +109,14 @@ beads and sends trend data to mayor/.
 
 Examples:
   gt compact report              # Run compaction + send daily digest
-  gt compact report --dry-run    # Preview the report without sending
+  gt compact report --dry-run    # Preview only: no compaction, no mail
   gt compact report --weekly     # Send weekly rollup to mayor/
   gt compact report --json       # Output report as JSON`,
 	RunE: runCompactReport,
 }
 
 func init() {
-	compactReportCmd.Flags().BoolVar(&compactReportDryRun, "dry-run", false, "Preview report without sending")
+	compactReportCmd.Flags().BoolVar(&compactReportDryRun, "dry-run", false, "Preview report without compacting or sending")
 	compactReportCmd.Flags().BoolVar(&compactReportWeekly, "weekly", false, "Generate weekly rollup instead of daily digest")
 	compactReportCmd.Flags().BoolVarP(&compactReportVerbose, "verbose", "v", false, "Verbose output")
 	compactReportCmd.Flags().StringVar(&compactReportDate, "date", "", "Report for specific date (YYYY-MM-DD); default: today")
