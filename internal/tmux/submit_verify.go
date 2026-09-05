@@ -314,6 +314,12 @@ func (t *Tmux) recoverStrandedComposer(target, message, needle, promptPrefix str
 		return nil
 	case probeComposerCleared:
 		if err := t.sendMessageToTarget(target, message); err != nil {
+			// A retype that failed mid-chunk leaves a fragment in the composer
+			// we just cleared, which is the state this recovery exists to get
+			// out of. Clear it again rather than hand it back armed.
+			if errors.Is(err, errPartialStage) {
+				t.clearStagedText(target)
+			}
 			return fmt.Errorf("%w (retype failed: %v)", ErrSubmitNotVerified, err)
 		}
 		time.Sleep(adaptiveTextDelay(len(message)))
