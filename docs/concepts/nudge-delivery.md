@@ -206,10 +206,18 @@ correctly, so **within the poller process no `send-keys` invocation can emit
 `unknown flag -u` except through its text argument.** That is a positive
 source result, not an inference from the error string.
 
-**Not proven.** That a chunk boundary is what produced the specific errors
-logged at 22:20Z. The error text cannot discriminate — `unknown flag -u` is
-reproducible from a leading-`-u` payload *and* from a genuinely misplaced `-u`
-option — and the queue contents that produced those lines are gone.
+**Reconciled.** An objection was raised that the payload always opens with
+`<system-reminder>`, so the first token can never be a flag — which is true,
+and does not touch the defect: the chunk loop splits at a fixed byte offset, so
+a *later* chunk can open with `-u…` or `-r…` even though the whole payload
+never does. Both readings are right, and the chunk boundary is what joins them.
+
+**Still not byte-attributable.** That a chunk boundary produced the *specific*
+errors logged at 22:20Z. `unknown flag -u` is reproducible from a leading-`-u`
+payload *and* from a genuinely misplaced `-u` option, so the error text cannot
+discriminate on its own, and the queue contents that produced those lines are
+gone. What closes the gap is the call-graph result above rather than the log:
+in that process there is no other way for a `-u` to reach a subcommand.
 
 **Measured while writing this (2026-09-05, 13 live queues, 60 chunk
 boundaries): zero chunks began with `-`.** Replaying `FormatForInjection` over
