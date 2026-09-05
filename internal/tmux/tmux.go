@@ -371,7 +371,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	// On Windows (psmux), respawn-pane doesn't support passing a command
 	// argument, so we use send-keys to type the command into the shell.
 	if runtime.GOOS == "windows" {
-		if _, err := t.run("send-keys", "-t", name, command, "Enter"); err != nil {
+		if _, err := t.sendKeysText(name, false, command, "Enter"); err != nil {
 			_ = t.KillSession(name)
 			return fmt.Errorf("failed to send command in session %q: %w", name, err)
 		}
@@ -433,7 +433,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 
 	// Replace the initial shell with the actual command.
 	if runtime.GOOS == "windows" {
-		if _, err := t.run("send-keys", "-t", name, command, "Enter"); err != nil {
+		if _, err := t.sendKeysText(name, false, command, "Enter"); err != nil {
 			_ = t.KillSession(name)
 			return fmt.Errorf("failed to send command in session %q: %w", name, err)
 		}
@@ -1278,7 +1278,7 @@ func (t *Tmux) SendKeys(session, keys string) error {
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr error) {
 	defer func() { telemetry.RecordPromptSend(context.Background(), session, keys, debounceMs, retErr) }()
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", session, "-l", keys); err != nil {
+	if err := t.sendKeysLiteral(session, keys); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1292,7 +1292,7 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr e
 
 // SendKeysRaw sends keystrokes without adding Enter.
 func (t *Tmux) SendKeysRaw(session, keys string) error {
-	_, err := t.run("send-keys", "-t", session, keys)
+	_, err := t.sendKeysText(session, false, keys)
 	return err
 }
 
@@ -1607,6 +1607,88 @@ func adaptiveTextDelay(messageLen int) time.Duration {
 // raw stdin (like Claude Code's TUI) are not affected.
 const sendKeysChunkSize = 512
 
+// sendKeysLiteral sends one piece of literal text to a tmux target.
+//
+// The "--" is load-bearing, and its absence was the whole of gt-sve. tmux
+// parses a subcommand's arguments with getopt(3), which keeps scanning for
+// flags after "-l" — so a text argument that begins with "-" is read as
+// flags, not as text. tmux 3.4 then fails the command outright:
+//
+//	tmux send-keys -t pane -l '-u hello'     -> command send-keys: unknown flag -u
+//	tmux send-keys -t pane -l -- '-u hello'  -> delivers the literal text
+//
+// Nudge text reaches here as fixed-size chunks (see sendMessageToTarget), so
+// which byte lands first in a chunk is an accident of message length: a batch
+// whose 512-byte boundary falls just before "-urgent" reports "unknown flag
+// -u", one that splits "<system-reminder>" reports "-r". Because a retried
+// batch is byte-identical, the same boundary reproduces the same failure on
+// every attempt, which is what turned one bad split into a poller log full of
+// identical injection errors.
+//
+// Every send in this package that carries caller-supplied text goes through
+// sendKeysText so the terminator cannot be forgotten at a new call site;
+// sendKeysLiteral is the -l form of it.
+func (t *Tmux) sendKeysLiteral(target, text string) error {
+	_, err := t.sendKeysText(target, true, text)
+	return err
+}
+
+// sendKeysText is the general form: it runs send-keys for arguments that
+// carry caller-supplied text rather than fixed key names, with "--" always
+// terminating the flag list first.
+//
+// The literal (-l) sends are where gt-sve was measured, but the defect is in
+// the argument POSITION, not in -l: send-keys parses its whole argument list
+// with getopt, so any argument that can begin with "-" and is not protected
+// by "--" is read as flags. That covers the key-name position too, which is
+// how "SendKeysDebounced uses only valid flags" came to be a true statement
+// that cleared the wrong thing — the flags were never the problem, the data
+// was. Routing every text-carrying site through one helper is what stops a
+// new call site from reintroducing it.
+//
+// Calls that pass only compile-time key-name constants ("Enter", "Escape",
+// "C-u", "C-j", "Down", "-X" "cancel") do not need this and do not use it:
+// they cannot vary at runtime. The audit of those sites is in
+// docs/concepts/nudge-delivery.md.
+func (t *Tmux) sendKeysText(target string, literal bool, args ...string) (string, error) {
+	return t.run(buildSendKeysArgs(target, literal, args)...)
+}
+
+// buildSendKeysArgs is the pure argument-vector core of sendKeysText, split
+// out so the position of "--" is testable without a tmux server.
+func buildSendKeysArgs(target string, literal bool, args []string) []string {
+	cmd := make([]string, 0, len(args)+5)
+	cmd = append(cmd, "send-keys", "-t", target)
+	if literal {
+		cmd = append(cmd, "-l")
+	}
+	cmd = append(cmd, "--")
+	return append(cmd, args...)
+}
+
+// errPartialStage marks a send that failed after at least one chunk had
+// already been typed into the target, so the pane is holding a fragment of a
+// message that will never be completed.
+//
+// The distinction is the whole reason a failed injection is dangerous rather
+// than merely useless. A fragment is not inert: it sits unsubmitted in the
+// composer, and the next Enter from any source — a later nudge, the agent, a
+// person glancing at the pane — submits the truncated text as if the sender
+// had written it (hq-r77q, gt-pdf, hq-0p1l, cl-jkr).
+var errPartialStage = errors.New("message partially staged in pane")
+
+// clearStagedText removes a fragment left in a target's composer by a failed
+// send, so the failure cannot arm a later Enter.
+//
+// C-u is the same clear SendKeysReplace uses. It is best-effort by nature:
+// against a composer holding several lines it clears the current one, and it
+// cannot distinguish our fragment from text the agent typed itself. Calling it
+// only on errPartialStage keeps that cost on the path where a fragment is
+// known to exist — a successful send never reaches here.
+func (t *Tmux) clearStagedText(target string) {
+	_, _ = t.run("send-keys", "-t", target, "C-u")
+}
+
 func (t *Tmux) sendMessageToTarget(target, text string) error {
 	if len(text) <= sendKeysChunkSize {
 		return t.sendKeysLiteralWithRetry(target, text, constants.NudgeReadyTimeout)
@@ -1625,8 +1707,9 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 				return err
 			}
 		} else {
-			if _, err := t.run("send-keys", "-t", target, "-l", chunk); err != nil {
-				return err
+			if err := t.sendKeysLiteral(target, chunk); err != nil {
+				// Chunks before this one are already in the pane.
+				return fmt.Errorf("%w: chunk at byte %d: %v", errPartialStage, i, err)
 			}
 		}
 		// Small delay between chunks to let the terminal process
@@ -1656,7 +1739,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		err := t.sendKeysLiteral(target, text)
 		if err == nil {
 			return nil
 		}
@@ -1855,6 +1938,9 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
 	if err := t.sendMessageToTarget(target, sanitized); err != nil {
+		if errors.Is(err, errPartialStage) {
+			t.clearStagedText(target)
+		}
 		return err
 	}
 
@@ -1938,6 +2024,9 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
 	if err := t.sendMessageToTarget(pane, sanitized); err != nil {
+		if errors.Is(err, errPartialStage) {
+			t.clearStagedText(pane)
+		}
 		return err
 	}
 
@@ -3824,7 +3913,7 @@ func (t *Tmux) RespawnPane(pane, command string) error {
 		if _, err := t.run("respawn-pane", "-k", "-t", pane); err != nil {
 			return err
 		}
-		_, err := t.run("send-keys", "-t", pane, command, "Enter")
+		_, err := t.sendKeysText(pane, false, command, "Enter")
 		return err
 	}
 	_, err := t.run("respawn-pane", "-k", "-t", pane, command)
@@ -3842,10 +3931,10 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 		// Change directory first if needed, then run command
 		if workDir != "" {
 			cdCmd := fmt.Sprintf("Set-Location %s; %s", psQuoteValue(workDir), command)
-			_, err := t.run("send-keys", "-t", pane, cdCmd, "Enter")
+			_, err := t.sendKeysText(pane, false, cdCmd, "Enter")
 			return err
 		}
-		_, err := t.run("send-keys", "-t", pane, command, "Enter")
+		_, err := t.sendKeysText(pane, false, command, "Enter")
 		return err
 	}
 	args := []string{"respawn-pane", "-k", "-t", pane}

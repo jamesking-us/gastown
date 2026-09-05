@@ -378,7 +378,7 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			// Drain atomically claims queued entries (rename-based).
 			// If another process raced and drained first, we get an
 			// empty slice and skip delivery to avoid duplicates.
-			drained, _ := nudge.Drain(townRoot, sessionName)
+			drained, _ := nudge.DrainInjectable(townRoot, sessionName)
 			if len(drained) == 0 {
 				return
 			}
@@ -393,8 +393,11 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 	// Timeout — nudge stays in queue for next watcher or manual drain.
 }
 
+// requeueDrainedNudges returns a batch whose tmux injection failed. The batch
+// is marked hook-only on the way back, so no injector types it at a pane
+// again — the deliver-once-or-fail rule. See nudge.RequeueHookOnly.
 func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
-	if err := nudge.Requeue(townRoot, sessionName, drained); err != nil {
+	if err := nudge.RequeueHookOnly(townRoot, sessionName, drained); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: requeue for %s failed: %v\n", source, sessionName, err)
 	}
 }

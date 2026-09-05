@@ -119,27 +119,75 @@ func TestStopPoller_StalePid(t *testing.T) {
 	}
 }
 
+// startFakePoller launches a live helper process whose command line carries
+// the poller signature, and returns its PID.
+//
+// A bare `sleep` is no longer enough. pollerAlive asks two questions — is the
+// PID running, and is the process behind it this session's poller — because
+// liveness alone cannot tell a working poller from a PID that was recycled to
+// something unrelated (gt-sve item 3).
+//
+// The helper is a script named `gt` invoked as `gt nudge-poller <session>`,
+// which is the shape buildPollerCommand produces. Hiding the signature in a
+// `sh -c` string would be shorter and is not reliable: a shell is free to exec
+// away a single simple command, and the replacement process does not inherit
+// the -c text. Real arguments survive that; a comment does not.
+func startFakePoller(t *testing.T, session string) int {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("helper relies on a shell script and ps")
+	}
+
+	script := filepath.Join(t.TempDir(), "gt")
+	// Two statements, so a shell cannot exec the sleep in place of itself.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n:\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "nudge-poller", session)
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start helper process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	// The helper is scaffolding, not the thing under test. If this platform's
+	// ps or shell does not preserve the argument vector, say so rather than
+	// reporting it as a pollerAlive failure.
+	if !pollerProcessMatches(cmd.Process.Pid, session) {
+		t.Skipf("helper pid %d does not present a poller command line on this platform", cmd.Process.Pid)
+	}
+	return cmd.Process.Pid
+}
+
+// writePollerPid points a session's pidfile at pid.
+func writePollerPid(t *testing.T, townRoot, session string, pid int) string {
+	t.Helper()
+	if err := os.MkdirAll(pollerPidDir(townRoot), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := pollerPidFile(townRoot, session)
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return pidPath
+}
+
 func TestPollerAlive_LiveProcess(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-test"
 
-	// Write our own PID — we're definitely alive.
-	pidDir := pollerPidDir(townRoot)
-	if err := os.MkdirAll(pidDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pidPath := pollerPidFile(townRoot, session)
-	myPid := os.Getpid()
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(myPid)), 0644); err != nil {
-		t.Fatal(err)
-	}
+	livePid := startFakePoller(t, session)
+	writePollerPid(t, townRoot, session, livePid)
 
 	pid, alive := pollerAlive(townRoot, session)
 	if !alive {
 		t.Error("pollerAlive() returned false for live process")
 	}
-	if pid != myPid {
-		t.Errorf("pollerAlive() pid = %d, want %d", pid, myPid)
+	if pid != livePid {
+		t.Errorf("pollerAlive() pid = %d, want %d", pid, livePid)
 	}
 }
 
