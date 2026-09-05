@@ -165,9 +165,16 @@ func pollerAlive(townRoot, session string) (int, bool) {
 		return 0, false
 	}
 
-	if !procutil.IsAlive(pid) {
-		// Stale PID file, or a zombie the pidfile still names — clean up so
-		// the next StartPoller respawns instead of adopting the corpse.
+	// Two questions, because liveness alone answers only the first: is the
+	// PID running, and is the process behind it actually our poller? A
+	// container restart replays the low PID range while these pidfiles still
+	// name PIDs from the previous boot, so a recycled PID belonging to some
+	// unrelated process passes IsAlive and pins the seat at "already running"
+	// permanently.
+	if !procutil.IsAlive(pid) || !pollerProcessMatches(pid, session) {
+		// Stale PID file, a zombie the pidfile still names, or a PID that now
+		// belongs to something else — clean up so the next StartPoller
+		// respawns instead of adopting it.
 		_ = os.Remove(pidPath)
 		return 0, false
 	}

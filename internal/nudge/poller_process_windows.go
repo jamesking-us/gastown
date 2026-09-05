@@ -2,21 +2,11 @@
 
 package nudge
 
-import (
-	"math"
-
-	"golang.org/x/sys/windows"
-)
-
-func pollerProcessAlive(pid int) bool {
-	if pid <= 0 || pid > math.MaxUint32 {
-		return false
-	}
-
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return err == windows.ERROR_ACCESS_DENIED
-	}
-	_ = windows.CloseHandle(handle)
+// pollerProcessMatches has no Windows implementation: there is no zombie
+// state to confuse OpenProcess, and reading another process's command line
+// needs a WMI or NtQueryInformationProcess round-trip that the Unix path
+// gets from a single `ps`. Fails open, matching the Unix behaviour when `ps`
+// cannot answer — the caller keeps the liveness result.
+func pollerProcessMatches(_ int, _ string) bool {
 	return true
 }

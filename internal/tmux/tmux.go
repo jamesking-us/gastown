@@ -371,7 +371,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	// On Windows (psmux), respawn-pane doesn't support passing a command
 	// argument, so we use send-keys to type the command into the shell.
 	if runtime.GOOS == "windows" {
-		if _, err := t.run("send-keys", "-t", name, command, "Enter"); err != nil {
+		if _, err := t.sendKeysText(name, false, command, "Enter"); err != nil {
 			_ = t.KillSession(name)
 			return fmt.Errorf("failed to send command in session %q: %w", name, err)
 		}
@@ -433,7 +433,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 
 	// Replace the initial shell with the actual command.
 	if runtime.GOOS == "windows" {
-		if _, err := t.run("send-keys", "-t", name, command, "Enter"); err != nil {
+		if _, err := t.sendKeysText(name, false, command, "Enter"); err != nil {
 			_ = t.KillSession(name)
 			return fmt.Errorf("failed to send command in session %q: %w", name, err)
 		}
@@ -1292,7 +1292,7 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr e
 
 // SendKeysRaw sends keystrokes without adding Enter.
 func (t *Tmux) SendKeysRaw(session, keys string) error {
-	_, err := t.run("send-keys", "-t", session, keys)
+	_, err := t.sendKeysText(session, false, keys)
 	return err
 }
 
@@ -1625,11 +1625,45 @@ const sendKeysChunkSize = 512
 // every attempt, which is what turned one bad split into a poller log full of
 // identical injection errors.
 //
-// Every literal send in this package goes through here so the terminator
-// cannot be forgotten at a new call site.
+// Every send in this package that carries caller-supplied text goes through
+// sendKeysText so the terminator cannot be forgotten at a new call site;
+// sendKeysLiteral is the -l form of it.
 func (t *Tmux) sendKeysLiteral(target, text string) error {
-	_, err := t.run("send-keys", "-t", target, "-l", "--", text)
+	_, err := t.sendKeysText(target, true, text)
 	return err
+}
+
+// sendKeysText is the general form: it runs send-keys for arguments that
+// carry caller-supplied text rather than fixed key names, with "--" always
+// terminating the flag list first.
+//
+// The literal (-l) sends are where gt-sve was measured, but the defect is in
+// the argument POSITION, not in -l: send-keys parses its whole argument list
+// with getopt, so any argument that can begin with "-" and is not protected
+// by "--" is read as flags. That covers the key-name position too, which is
+// how "SendKeysDebounced uses only valid flags" came to be a true statement
+// that cleared the wrong thing — the flags were never the problem, the data
+// was. Routing every text-carrying site through one helper is what stops a
+// new call site from reintroducing it.
+//
+// Calls that pass only compile-time key-name constants ("Enter", "Escape",
+// "C-u", "C-j", "Down", "-X" "cancel") do not need this and do not use it:
+// they cannot vary at runtime. The audit of those sites is in
+// docs/concepts/nudge-delivery.md.
+func (t *Tmux) sendKeysText(target string, literal bool, args ...string) (string, error) {
+	return t.run(buildSendKeysArgs(target, literal, args)...)
+}
+
+// buildSendKeysArgs is the pure argument-vector core of sendKeysText, split
+// out so the position of "--" is testable without a tmux server.
+func buildSendKeysArgs(target string, literal bool, args []string) []string {
+	cmd := make([]string, 0, len(args)+5)
+	cmd = append(cmd, "send-keys", "-t", target)
+	if literal {
+		cmd = append(cmd, "-l")
+	}
+	cmd = append(cmd, "--")
+	return append(cmd, args...)
 }
 
 // errPartialStage marks a send that failed after at least one chunk had
@@ -3879,7 +3913,7 @@ func (t *Tmux) RespawnPane(pane, command string) error {
 		if _, err := t.run("respawn-pane", "-k", "-t", pane); err != nil {
 			return err
 		}
-		_, err := t.run("send-keys", "-t", pane, command, "Enter")
+		_, err := t.sendKeysText(pane, false, command, "Enter")
 		return err
 	}
 	_, err := t.run("respawn-pane", "-k", "-t", pane, command)
@@ -3897,10 +3931,10 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 		// Change directory first if needed, then run command
 		if workDir != "" {
 			cdCmd := fmt.Sprintf("Set-Location %s; %s", psQuoteValue(workDir), command)
-			_, err := t.run("send-keys", "-t", pane, cdCmd, "Enter")
+			_, err := t.sendKeysText(pane, false, cdCmd, "Enter")
 			return err
 		}
-		_, err := t.run("send-keys", "-t", pane, command, "Enter")
+		_, err := t.sendKeysText(pane, false, command, "Enter")
 		return err
 	}
 	args := []string{"respawn-pane", "-k", "-t", pane}

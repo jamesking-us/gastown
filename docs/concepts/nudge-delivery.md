@@ -79,8 +79,47 @@ The searched-for "`-u` in tmux subcommand position" was never a hardcoded
 argument. `BuildCommandContext` and `Tmux.commandContext` build the global `-u`
 correctly and were rightly exonerated. The bug was the *absence* of `--`.
 
-Fixed by routing every literal send through `Tmux.sendKeysLiteral`, which adds
-the terminator once so no future call site can omit it.
+Fixed by routing every send that carries caller-supplied text through
+`Tmux.sendKeysText`, which adds the terminator once so no future call site can
+omit it. `sendKeysLiteral` is the `-l` form of that helper.
+
+The literal sends are where the failure was measured, but `--` is not about
+`-l`: `send-keys` parses its whole argument list with getopt, so the key-name
+position has the same defect whenever the argument can vary at runtime. This
+is how "`SendKeysDebounced` uses only valid flags (`-t`, `-l`, then a separate
+Enter)" came to be a true statement that cleared the wrong thing. **The flags
+were never the problem; the data was.** Enumerate call sites by pattern, not by
+reading, and audit the argument position rather than the flag list.
+
+Routed through the helper (all carry runtime text):
+
+| Site | Path |
+|---|---|
+| `sendMessageToTarget` chunk loop | poller / idle watcher / `gt nudge` |
+| `sendKeysLiteralWithRetry` | first chunk and short messages |
+| `SendKeysDebounced` | most agent prompts |
+| `SendKeysRaw` | exported; key-name position |
+| `NewSessionWithCommand` / `NewSessionWithCommandAndEnv` (Windows psmux) | session startup command |
+| `RespawnPane` / `RespawnPaneWithWorkDir` (Windows psmux) | hot reload command |
+
+> **Unverified on Windows.** The four psmux sites are included because the
+> rule is "every text-carrying site, one helper" and a carve-out is how the
+> next one hides. But psmux is a separate tmux-compatible shim with no source
+> in this tree, so its handling of `--` was not tested — only real tmux 3.4
+> was. Nearly every argument parser honours `--`; if psmux does not, it would
+> type a stray `--` ahead of the startup command. Worth a Windows check before
+> anyone relies on it.
+
+Audited and deliberately **not** routed: the seventeen remaining
+`t.run("send-keys", …)` calls pass only compile-time key-name constants
+(`Enter`, `Escape`, `C-u`, `C-j`, `Down`, `-X cancel`). They cannot vary at
+runtime, so they cannot carry a leading `-`. Re-run the audit with:
+
+```
+grep -rn 't.run("send-keys"' --include='*.go' internal/ | grep -v _test.go
+```
+
+Any hit whose trailing argument is a variable belongs in the helper.
 
 ### 2. Retry-restaging into panes
 
@@ -128,9 +167,60 @@ seat, and `cl-witness` at PID 3512 during this fix. `pollerAlive` and
 `StopPoller` now use `procutil.IsAlive`, which confirms the state is not zombie
 (cl-d77p).
 
+Liveness is only half the question. `procutil.IsAlive` establishes that the
+*PID* is running; `pollerProcessMatches` establishes that the *process* behind
+it is this session's poller, by reading its command line. The two failures
+arrive by the same route: the 21:25Z container restart replayed the low PID
+range while the pidfiles still named PIDs from the previous boot, leaving 7 of
+14 seats pointing at processes that no longer existed. Any one of those numbers
+being reissued to an unrelated process would pass every liveness probe and pin
+the seat at "already running" for as long as that process lived. The identity
+check fails **open** — if `ps` cannot answer, the liveness result stands, since
+a false "not ours" costs a duplicate poller on every hiccup.
+
 **Verify liveness against the process, never against the pidfile.** Pidfiles in
 `.runtime/nudge_poller/` are stale by design — a town-wide audit found 47 of
 them against 12 live seats — so pidfile count is not a health metric.
+
+### How much item 3 costs, so it is not over-scoped
+
+`gt nudge` starts the poller for its target, so a seat with a dead poller is
+not permanently deaf: the next inbound nudge revives the channel. What the
+pidfile-vs-process bug actually costs is the backlog sitting in the queue at
+the moment of death, plus everything that expires before the next inbound
+nudge arrives.
+
+## What is proven, and what is not
+
+The three defects above are all source-verified and independently
+reproducible. Their *relative contribution to the 2026-09-05 outage* is not
+settled, and this section exists so nobody reads more into the fix than the
+evidence carries.
+
+**Proven.** `--` is required and sufficient for `-`-leading text on tmux 3.4
+(reproduced both directions). Both text-carrying `send-keys` calls on the
+poller's own path — `nudge_poller.go` → `NudgeSessionWithOpts` →
+`sendMessageToTarget` → the chunk loop and `sendKeysLiteralWithRetry` — lacked
+it. Neither passes `-u` itself, and `commandContext` builds the global `-u`
+correctly, so **within the poller process no `send-keys` invocation can emit
+`unknown flag -u` except through its text argument.** That is a positive
+source result, not an inference from the error string.
+
+**Not proven.** That a chunk boundary is what produced the specific errors
+logged at 22:20Z. The error text cannot discriminate — `unknown flag -u` is
+reproducible from a leading-`-u` payload *and* from a genuinely misplaced `-u`
+option — and the queue contents that produced those lines are gone.
+
+**Measured while writing this (2026-09-05, 13 live queues, 60 chunk
+boundaries): zero chunks began with `-`.** Replaying `FormatForInjection` over
+the live queue found no hit at that moment, though the same replay earlier in
+the evening did find one (session `hq-mayor`, chunk at offset 512 beginning
+`-reminder>`). So the mechanism demonstrably fires and is rare — roughly the
+frequency of `-` as a byte, about 1%. Rarity is not a defence: a batch that
+hits it is byte-identical on every retry, so one unlucky split plus defect 2's
+requeue loop is exactly a log of 39 identical errors. **Defect 2 is the
+amplifier that turns a 1%-per-boundary accident into an outage**, which is why
+it, and not the `--`, is the load-bearing part of this fix.
 
 ## Measurement traps
 

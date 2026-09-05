@@ -98,27 +98,14 @@ func TestPollerAlive_LiveChildProcess(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-witness"
 
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot start helper process: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-
-	if err := os.MkdirAll(pollerPidDir(townRoot), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pollerPidFile(townRoot, session), []byte(strconv.Itoa(cmd.Process.Pid)), 0644); err != nil {
-		t.Fatal(err)
-	}
+	livePid := startFakePoller(t, session)
+	writePollerPid(t, townRoot, session, livePid)
 
 	pid, alive := pollerAlive(townRoot, session)
 	if !alive {
 		t.Fatal("pollerAlive() = false for a live process")
 	}
-	if pid != cmd.Process.Pid {
-		t.Errorf("pollerAlive() pid = %d, want %d", pid, cmd.Process.Pid)
+	if pid != livePid {
+		t.Errorf("pollerAlive() pid = %d, want %d", pid, livePid)
 	}
 }
