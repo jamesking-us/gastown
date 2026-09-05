@@ -134,9 +134,19 @@ func (c *IdleTimeoutCheck) Fix(ctx *CheckContext) error {
 		// The .beads directory is within the rig path
 		rigBeadsPath := filepath.Join(rigPath, ".beads")
 
-		// Use EnsureConfigYAML to add idle-timeout if missing
-		// This is idempotent - won't modify if already correct
-		if err := beads.EnsureConfigYAML(rigBeadsPath, ""); err != nil {
+		// This fix owns exactly one key: dolt.idle-timeout. It must never
+		// rewrite prefix/issue-prefix — blanking those hands routing to bd's
+		// Dolt config fallback and silently sends a seat's beads off-rig
+		// (gt-7pn, gt-sym).
+		//
+		// When config.yaml is absent, create a complete one with the prefix
+		// derived from the rig's metadata.json. The empty fallback is
+		// deliberate: if no prefix can be derived, write none rather than
+		// guess one from the rig name or blank the key.
+		if err := beads.EnsureConfigYAMLFromMetadataIfMissing(rigBeadsPath, ""); err != nil {
+			return fmt.Errorf("fixing %s: %w", rigName, err)
+		}
+		if err := beads.EnsureConfigYAMLValue(rigBeadsPath, "dolt.idle-timeout", `"0"`); err != nil {
 			return fmt.Errorf("fixing %s: %w", rigName, err)
 		}
 	}

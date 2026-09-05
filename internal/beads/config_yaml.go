@@ -10,6 +10,12 @@ import (
 
 // EnsureConfigYAML ensures config.yaml has both prefix keys set for the given
 // beads namespace. Existing non-prefix settings are preserved.
+//
+// An empty prefix never reaches config.yaml: a blank "prefix:" line is not a
+// neutral state, it is the state in which bd falls back to the Dolt config
+// table for routing, which can silently send a seat's beads off-rig (gt-7pn,
+// gt-sym). Callers that only want the non-prefix defaults get exactly that;
+// existing prefix lines are left untouched.
 func EnsureConfigYAML(beadsDir, prefix string) error {
 	return ensureConfigYAML(beadsDir, prefix, false)
 }
@@ -21,6 +27,11 @@ func EnsureConfigYAMLValue(beadsDir, key, value string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return fmt.Errorf("empty config key")
+	}
+	// Blanking a prefix key arms bd's Dolt-config routing fallback; refuse
+	// rather than write it (gt-7pn).
+	if isPrefixKey(key) && strings.TrimSpace(value) == "" {
+		return fmt.Errorf("refusing to write empty %s to config.yaml in %s", key, beadsDir)
 	}
 	wantLine := key + ": " + value
 	configPath := filepath.Join(beadsDir, "config.yaml")
@@ -144,8 +155,16 @@ func ConfigYAMLDisablesAutoExport(content string) bool {
 	return false
 }
 
+// isPrefixKey reports whether key is one of the config.yaml routing prefix
+// keys, which must never be written empty.
+func isPrefixKey(key string) bool {
+	return key == "prefix" || key == "issue-prefix"
+}
+
 func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	configPath := filepath.Join(beadsDir, "config.yaml")
+	// An empty prefix means "do not touch the prefix keys" — see EnsureConfigYAML.
+	writePrefix := strings.TrimSpace(prefix) != ""
 	wantPrefix := "prefix: " + prefix
 	wantIssuePrefix := "issue-prefix: " + prefix
 	// Gas Town rigs should disable idle-monitor to use centralized Dolt server
@@ -156,8 +175,13 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
-		// New config: include all Gas Town defaults
-		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantExportAuto + "\n"
+		// New config: include all Gas Town defaults, minus the prefix keys when
+		// no prefix was supplied.
+		var content string
+		if writePrefix {
+			content += wantPrefix + "\n" + wantIssuePrefix + "\n"
+		}
+		content += wantIdleTimeout + "\n" + wantExportAuto + "\n"
 		return os.WriteFile(configPath, []byte(content), 0644)
 	}
 	if err != nil {
@@ -177,12 +201,16 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "prefix:") {
-			lines[i] = wantPrefix
+			if writePrefix {
+				lines[i] = wantPrefix
+			}
 			foundPrefix = true
 			continue
 		}
 		if strings.HasPrefix(trimmed, "issue-prefix:") {
-			lines[i] = wantIssuePrefix
+			if writePrefix {
+				lines[i] = wantIssuePrefix
+			}
 			foundIssuePrefix = true
 			continue
 		}
@@ -198,10 +226,10 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 		}
 	}
 
-	if !foundPrefix {
+	if !foundPrefix && writePrefix {
 		lines = append(lines, wantPrefix)
 	}
-	if !foundIssuePrefix {
+	if !foundIssuePrefix && writePrefix {
 		lines = append(lines, wantIssuePrefix)
 	}
 	if !foundIdleTimeout {
