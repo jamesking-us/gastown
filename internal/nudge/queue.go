@@ -69,6 +69,12 @@ type QueuedNudge struct {
 	// DeliverAfter, if non-zero, defers delivery until this time has passed.
 	// Drain skips (but does not discard) the nudge until the deadline is met.
 	DeliverAfter time.Time `json:"deliver_after,omitempty"`
+	// InjectionFailed marks a nudge that has already been typed at a pane once
+	// and failed. It stays deliverable through the harness-side hook drain,
+	// which needs no tmux at all, but DrainInjectable will not hand it to a
+	// tmux injector a second time. See RequeueHookOnly for why one attempt is
+	// the limit.
+	InjectionFailed bool `json:"injection_failed,omitempty"`
 }
 
 // queueDir returns the nudge queue directory for a given session.
@@ -168,6 +174,35 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 	return nil
 }
 
+// RequeueHookOnly returns drained nudges to the queue after a failed tmux
+// injection, marked so that no injector will type them at a pane again.
+//
+// This is the deliver-once-or-fail rule, and it exists because the retry it
+// replaces was an attack on the recipient rather than a second chance. A
+// failed injection does not fail cleanly: the text is typed into the agent's
+// composer in 512-byte chunks, so a chunk that tmux rejects leaves every
+// earlier chunk sitting unsubmitted in the pane. Plain Requeue then handed the
+// same batch back on the next poll, which typed another fragment on top of the
+// last one — roughly every 12 seconds, bounded only by the 30-minute TTL, so
+// about 150 attempts. That is where the piles of staged text came from
+// (hq-r77q, gt-pdf, hq-0p1l), and why one witness seat took a single batch as
+// ~25 stacked copies the moment something pressed Enter (hq-8nll, gt-h9d).
+//
+// Marking rather than discarding matters just as much. An undelivered nudge is
+// not noise: an ACK that sat undelivered for 23 minutes was a subordinate
+// correcting an error in its supervisor's instruction, and it was right
+// (hq-z5eb). These entries stay in the queue at full TTL and the agent's own
+// UserPromptSubmit hook drain still delivers them, because that path prints
+// the text into the agent's turn and never touches tmux.
+func RequeueHookOnly(townRoot, session string, nudges []QueuedNudge) error {
+	marked := make([]QueuedNudge, len(nudges))
+	for i, n := range nudges {
+		n.InjectionFailed = true
+		marked[i] = n
+	}
+	return Requeue(townRoot, session, marked)
+}
+
 // Drain reads and removes all queued nudges for a session, returning them
 // in FIFO order. This is called by the hook to pick up pending nudges.
 //
@@ -178,6 +213,26 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 // Expired nudges (past ExpiresAt) are silently discarded during drain.
 // Orphaned .claimed files from crashed drainers are swept if older than 5 minutes.
 func Drain(townRoot, session string) ([]QueuedNudge, error) {
+	return drainAccepted(townRoot, session, nil)
+}
+
+// DrainInjectable is Drain restricted to nudges that may be typed into a tmux
+// pane. Entries a previous injection already failed on are left in the queue
+// for the hook drain instead of being claimed here — see RequeueHookOnly.
+//
+// Every tmux-injecting drainer (the background poller, the idle watcher) must
+// use this; Drain itself stays unfiltered for the hook path, which delivers by
+// printing into the agent's turn and cannot strand text in a pane.
+func DrainInjectable(townRoot, session string) ([]QueuedNudge, error) {
+	return drainAccepted(townRoot, session, func(n QueuedNudge) bool {
+		return !n.InjectionFailed
+	})
+}
+
+// drainAccepted is the shared body of Drain and DrainInjectable. A nil accept
+// takes everything; a nudge accept rejects is unclaimed and left in the queue,
+// exactly as a deferred nudge is.
+func drainAccepted(townRoot, session string, accept func(QueuedNudge) bool) ([]QueuedNudge, error) {
 	dir := queueDir(townRoot, session)
 
 	entries, err := os.ReadDir(dir)
@@ -283,6 +338,15 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 			continue
 		}
 
+		// Not for this drainer (e.g. an injector meeting a nudge that already
+		// failed injection once) — unclaim and leave it for one that is.
+		if accept != nil && !accept(n) {
+			if renameErr := os.Rename(claimPath, path); renameErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to unclaim filtered nudge %s: %v\n", entry.Name(), renameErr)
+			}
+			continue
+		}
+
 		nudges = append(nudges, n)
 
 		// Remove the claimed file after successful processing
@@ -312,6 +376,46 @@ func Pending(townRoot, session string) (int, error) {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 			count++
 		}
+	}
+
+	return count, nil
+}
+
+// PendingInjectable counts queued nudges a tmux injector would still deliver,
+// i.e. excluding those already marked by RequeueHookOnly. Unlike Pending it
+// reads each file, because the mark lives in the contents.
+//
+// A poller must count with this rather than Pending: Pending sees the marked
+// entries, so the poller would wake, find work, wait for idle and drain nothing
+// on every cycle until their TTL ran out.
+func PendingInjectable(townRoot, session string) (int, error) {
+	dir := queueDir(townRoot, session)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading nudge queue: %w", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			continue
+		}
+		if n.InjectionFailed {
+			continue
+		}
+		count++
 	}
 
 	return count, nil

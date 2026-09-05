@@ -1632,6 +1632,29 @@ func (t *Tmux) sendKeysLiteral(target, text string) error {
 	return err
 }
 
+// errPartialStage marks a send that failed after at least one chunk had
+// already been typed into the target, so the pane is holding a fragment of a
+// message that will never be completed.
+//
+// The distinction is the whole reason a failed injection is dangerous rather
+// than merely useless. A fragment is not inert: it sits unsubmitted in the
+// composer, and the next Enter from any source — a later nudge, the agent, a
+// person glancing at the pane — submits the truncated text as if the sender
+// had written it (hq-r77q, gt-pdf, hq-0p1l, cl-jkr).
+var errPartialStage = errors.New("message partially staged in pane")
+
+// clearStagedText removes a fragment left in a target's composer by a failed
+// send, so the failure cannot arm a later Enter.
+//
+// C-u is the same clear SendKeysReplace uses. It is best-effort by nature:
+// against a composer holding several lines it clears the current one, and it
+// cannot distinguish our fragment from text the agent typed itself. Calling it
+// only on errPartialStage keeps that cost on the path where a fragment is
+// known to exist — a successful send never reaches here.
+func (t *Tmux) clearStagedText(target string) {
+	_, _ = t.run("send-keys", "-t", target, "C-u")
+}
+
 func (t *Tmux) sendMessageToTarget(target, text string) error {
 	if len(text) <= sendKeysChunkSize {
 		return t.sendKeysLiteralWithRetry(target, text, constants.NudgeReadyTimeout)
@@ -1651,7 +1674,8 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 			}
 		} else {
 			if err := t.sendKeysLiteral(target, chunk); err != nil {
-				return err
+				// Chunks before this one are already in the pane.
+				return fmt.Errorf("%w: chunk at byte %d: %v", errPartialStage, i, err)
 			}
 		}
 		// Small delay between chunks to let the terminal process
@@ -1880,6 +1904,9 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
 	if err := t.sendMessageToTarget(target, sanitized); err != nil {
+		if errors.Is(err, errPartialStage) {
+			t.clearStagedText(target)
+		}
 		return err
 	}
 
@@ -1963,6 +1990,9 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
 	if err := t.sendMessageToTarget(pane, sanitized); err != nil {
+		if errors.Is(err, errPartialStage) {
+			t.clearStagedText(pane)
+		}
 		return err
 	}
 

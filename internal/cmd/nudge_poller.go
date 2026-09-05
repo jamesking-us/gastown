@@ -104,8 +104,11 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 				return nil // session gone, exit
 			}
 
-			// Check if there are queued nudges.
-			if n, _ := nudge.Pending(townRoot, sessionName); n == 0 {
+			// Check if there are queued nudges this poller may inject.
+			// Entries a previous injection failed on are excluded — they
+			// stay queued for the agent's hook drain, and counting them
+			// here would spin this loop until their TTL expired.
+			if n, _ := nudge.PendingInjectable(townRoot, sessionName); n == 0 {
 				continue
 			}
 
@@ -118,7 +121,7 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 			}
 
 			// Drain and inject.
-			drained, err := nudge.Drain(townRoot, sessionName)
+			drained, err := nudge.DrainInjectable(townRoot, sessionName)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "nudge-poller: drain error for %s: %v\n", sessionName, err)
 				continue
@@ -130,6 +133,10 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 			formatted := nudge.FormatForInjection(drained)
 			if err := t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
+				// Deliver-once-or-fail: this batch is not typed at the pane
+				// again. It goes back to the queue marked hook-only, so the
+				// agent's own drain still delivers it. Retrying the injection
+				// is what stacked partial copies of a batch in a composer.
 				requeueDrainedNudges(townRoot, sessionName, "nudge-poller", drained)
 			}
 		}
