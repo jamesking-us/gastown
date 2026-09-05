@@ -892,6 +892,7 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest, opts PostMergeOp
 	if opts.SkipSourceIssueClose {
 		result.SourceIssueSkipped = true
 		_, _ = fmt.Fprintf(m.output, "  %s Source issue left open by request: %s\n", style.Dim.Render("—"), workBeadID)
+		releaseMergedWorkHook(b.ForAgentBead(), m.output, mr.AgentBead, workBeadID)
 		return result, nil
 	}
 
@@ -910,6 +911,10 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest, opts PostMergeOp
 	result.SourceIssueNotFound = sourceResult.NotFound
 	result.SourceIssueBlocked = sourceResult.Blocked
 	result.SourceIssueBlockReason = sourceResult.BlockReason
+
+	if result.SourceIssueBlocked {
+		releaseMergedWorkHook(b.ForAgentBead(), m.output, mr.AgentBead, result.SourceIssueID)
+	}
 
 	return result, nil
 }

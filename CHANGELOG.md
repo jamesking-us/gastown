@@ -20,6 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Post-merge cleanup closed beads that state their own release condition**
+  (gt-qyq). `gt mq post-merge` closes the source issue as an unconditional side
+  effect of merging, and a bead whose written condition is "survives the merge;
+  closes on root-cause-found, or after a stated no-recurrence interval" was
+  discharged by the merge itself. The only control was a seat noticing and
+  reopening by hand, and that control has been measured failing: it held on one
+  bead because the refinery happened to be carrying the condition in prior-session
+  context, and failed on the very next merge when that accident was absent. Now
+  post-merge reads the bead: a `gt:stay-open`/`gt:hold-open`/`gt:no-auto-close`
+  label, or a `stay_open:`/`keep_open:`/`no_auto_close:` flag or a stated
+  `release_condition:`/`close_condition:`/`reopen_condition:` in the description,
+  design, notes, acceptance criteria or comments, blocks the close and says so —
+  in the bead's own terms, not the split-work advice to "close it by hand once the
+  remaining work lands". Both post-merge paths honour it, and the comment read is
+  fail-closed: comments that cannot be read block the close rather than pass it.
+  A withheld close now also releases the worker's `hook_bead` when it still names
+  that bead, so merged-but-open work no longer reads to the daemon's crash
+  detector as a dead session with live work on the hook (gt-8y9).
+
 - **Every PID-existence probe treated a zombie as alive, and every `pgrep -f`
   check could match itself** (cl-d77p). A bare `Signal(0)`/`kill -0` succeeds
   against a zombie (defunct) child — the kernel keeps its PID allocated until

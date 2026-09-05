@@ -849,6 +849,15 @@ bd list --type=merge-request --status=open | grep <polecat-name>
 
 Verify the command output shows all steps succeeded (✓ for each).
 
+**A source issue left open is a correct outcome, not a missed step.** Post-merge
+refuses to close a bead that this MR does not fully represent (split work, open
+child issues) or that states its own release condition (`stay_open:`,
+`release_condition:`, or a `gt:stay-open` label). It prints
+`! Source issue NOT closed: <id> (<reason>)`. Do NOT close such a bead by hand
+and do NOT re-run post-merge to force it: the bead closes when its stated
+condition is met, and a merge is not that condition. Pass `--skip-issue-close`
+when you already know this MR is only part of the bead's work.
+
 **Note**: In PR mode, run post-merge cleanup only after `gh pr merge` succeeds.
 The branch is deleted by `gt mq post-merge` after merge proof passes, not by
 `gh pr merge`. The `--skip-branch-delete` flag (gas-fk4) prevents branch deletion
@@ -940,7 +949,8 @@ Include in summary:
 - Branches merged (count, names)
 - MERGED mails sent (count - should match branches merged)
 - MR beads closed (count - should match branches merged)
-- Source issues closed (count - should match branches merged)
+- Source issues closed (count - matches branches merged, minus any bead post-merge
+  deliberately left open; list those with the reason it reported)
 - MERGE_READY mails archived (count - should match branches merged)
 - Test results (pass/fail)
 - Branches with conflicts (count, names)

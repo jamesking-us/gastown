@@ -61,39 +61,52 @@ func StayOpenTextReason(text string) string {
 		return ""
 	}
 	for _, line := range strings.Split(text, "\n") {
-		key, value, ok := splitStayOpenFieldLine(line)
-		if !ok {
-			continue
-		}
-		switch key {
-		case "stay_open", "keep_open", "no_auto_close":
-			if isStayOpenTruthy(value) {
-				return key
-			}
-		case "release_condition", "close_condition", "reopen_condition":
-			if value != "" && !isStayOpenWaived(value) {
-				return key
+		for _, field := range stayOpenFieldCandidates(line) {
+			switch field.key {
+			case "stay_open", "keep_open", "no_auto_close":
+				// The value routinely trails prose ("stay_open: true until the
+				// RCA lands"), so the flag is the first word of it.
+				if isStayOpenTruthy(firstToken(field.value)) {
+					return field.key
+				}
+			case "release_condition", "close_condition", "reopen_condition":
+				if field.value != "" && !isStayOpenWaived(field.value) {
+					return field.key
+				}
 			}
 		}
 	}
 	return ""
 }
 
-// splitStayOpenFieldLine parses "key: value" out of a line, normalizing the key
-// and tolerating the list, quote and emphasis markers around it.
-func splitStayOpenFieldLine(line string) (key, value string, ok bool) {
+type stayOpenField struct {
+	key   string
+	value string
+}
+
+// stayOpenFieldCandidates reads every "key: value" a line could be stating.
+// Beads are written by hand, so the marker is as often introduced ("ratified:
+// release_condition: ...") or decorated ("**Release condition:** ...") as it is
+// written bare, and only the segment immediately before a colon is treated as a
+// key — prose that merely mentions a key in passing does not match.
+func stayOpenFieldCandidates(line string) []stayOpenField {
 	line = strings.TrimSpace(line)
 	line = strings.TrimLeft(line, ">-*#+ \t")
-	colonIdx := strings.Index(line, ":")
-	if colonIdx <= 0 {
-		return "", "", false
+	parts := strings.Split(line, ":")
+	if len(parts) < 2 {
+		return nil
 	}
-	key = normalizeStayOpenKey(line[:colonIdx])
-	if key == "" {
-		return "", "", false
+
+	fields := make([]stayOpenField, 0, len(parts)-1)
+	for i := 0; i < len(parts)-1; i++ {
+		key := normalizeStayOpenKey(parts[i])
+		if key == "" {
+			continue
+		}
+		value := strings.Trim(strings.TrimSpace(strings.Join(parts[i+1:], ":")), "*`_ \t")
+		fields = append(fields, stayOpenField{key: key, value: value})
 	}
-	value = strings.Trim(strings.TrimSpace(line[colonIdx+1:]), "*`_ \t")
-	return key, value, true
+	return fields
 }
 
 // normalizeStayOpenKey lowercases a field key and folds '-' and ' ' to '_', so
@@ -104,6 +117,10 @@ func normalizeStayOpenKey(key string) string {
 	key = strings.ReplaceAll(key, "-", "_")
 	key = strings.ReplaceAll(key, " ", "_")
 	return key
+}
+
+func firstToken(value string) string {
+	return strings.TrimSpace(strings.SplitN(strings.TrimSpace(value), " ", 2)[0])
 }
 
 func isStayOpenTruthy(value string) bool {

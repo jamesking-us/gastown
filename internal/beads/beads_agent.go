@@ -565,6 +565,57 @@ func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{ActiveMR: &activeMR})
 }
 
+// ClearAgentHookBeadIfMatches clears hook_bead on an agent bead, but only when
+// it still points at expectedHook. Returns whether it cleared anything.
+//
+// The hook says what a worker is assigned to, not whether a bead is finished, and
+// the two come apart when merged work leaves its bead deliberately open — split
+// work, or a bead holding itself open on a stated release condition (gt-qyq).
+// A hook left pointing at such a bead reads to the daemon's crash detector as
+// "dead session, work still on the hook" and earns the worker a restart onto work
+// that already landed. Releasing the hook at the moment the merge is recorded
+// keeps that stale-state family (gt-8y9) closed.
+func (b *Beads) ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentHookBeadIfMatches(id, expectedHook)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedHook = strings.TrimSpace(expectedHook)
+	if id == "" || expectedHook == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.HookBead) != expectedHook {
+		return false, nil
+	}
+
+	fields.HookBead = ""
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ClearAgentActiveMRIfMatches clears active_mr only when it still references
 // expectedMR. It returns true when a clear was written.
 func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {

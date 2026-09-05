@@ -1427,12 +1427,17 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 
 	// 1. Close source issue with reference to MR. Resolve before MR close clears
 	// active_mr, then close after the real merge success has been recorded.
-	closeMergedWorkBead(e.beads, nil, e.output, mergedWorkBeadCloseRequest{
+	sourceResult := closeMergedWorkBead(e.beads, nil, e.output, mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Target:      mr.Target,
 		SourceIssue: workBeadID,
 		MergeCommit: result.MergeCommit,
 	})
+	if sourceResult.Blocked {
+		// The work landed; only the bead stays open. Release the hook so the
+		// worker is not restarted onto finished work (gt-qyq, gt-8y9).
+		releaseMergedWorkHook(e.beads.ForAgentBead(), e.output, mr.AgentBead, sourceResult.WorkBeadID)
+	}
 
 	// 1.2. Close conflict-resolution tasks that this land has made moot (hq-jnap).
 	// Conflict beads otherwise outlive the successful re-land of their content

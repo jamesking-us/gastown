@@ -54,6 +54,11 @@ func TestStayOpenReason_DetectsExplicitMarkers(t *testing.T) {
 			want:  "label:gt:hold-open",
 		},
 		{
+			name:  "introduced marker with trailing prose",
+			issue: &Issue{ID: "gt-a", Description: "mayor ratified: stay_open: true until the RCA lands"},
+			want:  "stay_open",
+		},
+		{
 			name:  "condition carried in a comment",
 			issue: &Issue{ID: "gt-a", Comments: []Comment{{Text: "ratified: release_condition: root cause found"}}},
 			want:  "comment:release_condition",
@@ -83,6 +88,8 @@ func TestStayOpenReason_IgnoresNonMarkers(t *testing.T) {
 		{name: "release condition n/a", issue: &Issue{ID: "gt-a", Notes: "Release condition: N/A"}},
 		{name: "prose about staying open", issue: &Issue{ID: "gt-a", Description: "The bead should stay open until we know more"}},
 		{name: "unrelated label", issue: &Issue{ID: "gt-a", Labels: []string{"gt:keep"}}},
+		{name: "key mentioned inside prose", issue: &Issue{ID: "gt-a", Description: "this bead has no release_condition worth stating: it just merges"}},
+		{name: "timeline with colons", issue: &Issue{ID: "gt-a", Notes: "17:04:43Z merge -> auto-close\n17:14:18Z third reopen"}},
 	}
 
 	for _, tt := range tests {

@@ -222,6 +222,38 @@ func refinerySplitWorkBeadReason(work workBeadCloser, issue *beads.Issue) string
 	return ""
 }
 
+// agentHookClearer is the one agent-bead write the merged-work close path makes.
+type agentHookClearer interface {
+	ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error)
+}
+
+// releaseMergedWorkHook takes merged work off its worker's hook when the source
+// bead is deliberately left open.
+//
+// Closing the bead is what normally releases the hook, so a withheld close —
+// split work, or a bead holding itself open on its own release condition —
+// leaves the worker pointing at work that has already landed. To the daemon's
+// crash detector that reads as a dead session with live work on the hook, and it
+// restarts the worker onto finished work (gt-8y9). The hook is released only
+// when it still names this bead, so a worker that has moved on is untouched.
+func releaseMergedWorkHook(hooks agentHookClearer, out io.Writer, agentBead, workBeadID string) {
+	agentBead = strings.TrimSpace(agentBead)
+	workBeadID = strings.TrimSpace(workBeadID)
+	if hooks == nil || agentBead == "" || workBeadID == "" {
+		return
+	}
+	cleared, err := hooks.ClearAgentHookBeadIfMatches(agentBead, workBeadID)
+	if err != nil {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "[Refinery] Warning: failed to clear hook_bead on agent bead %s: %v\n", agentBead, err)
+		}
+		return
+	}
+	if cleared && out != nil {
+		_, _ = fmt.Fprintf(out, "[Refinery] Released hook on %s: %s merged but stays open\n", agentBead, workBeadID)
+	}
+}
+
 // workBeadCommentReader is implemented by beads clients that can read a bead's
 // comments. It is optional: a client that cannot answer only loses the comment
 // half of the stay-open check.
