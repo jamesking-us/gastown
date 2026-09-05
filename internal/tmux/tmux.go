@@ -1278,7 +1278,7 @@ func (t *Tmux) SendKeys(session, keys string) error {
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr error) {
 	defer func() { telemetry.RecordPromptSend(context.Background(), session, keys, debounceMs, retErr) }()
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", session, "-l", keys); err != nil {
+	if err := t.sendKeysLiteral(session, keys); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1607,6 +1607,31 @@ func adaptiveTextDelay(messageLen int) time.Duration {
 // raw stdin (like Claude Code's TUI) are not affected.
 const sendKeysChunkSize = 512
 
+// sendKeysLiteral sends one piece of literal text to a tmux target.
+//
+// The "--" is load-bearing, and its absence was the whole of gt-sve. tmux
+// parses a subcommand's arguments with getopt(3), which keeps scanning for
+// flags after "-l" — so a text argument that begins with "-" is read as
+// flags, not as text. tmux 3.4 then fails the command outright:
+//
+//	tmux send-keys -t pane -l '-u hello'     -> command send-keys: unknown flag -u
+//	tmux send-keys -t pane -l -- '-u hello'  -> delivers the literal text
+//
+// Nudge text reaches here as fixed-size chunks (see sendMessageToTarget), so
+// which byte lands first in a chunk is an accident of message length: a batch
+// whose 512-byte boundary falls just before "-urgent" reports "unknown flag
+// -u", one that splits "<system-reminder>" reports "-r". Because a retried
+// batch is byte-identical, the same boundary reproduces the same failure on
+// every attempt, which is what turned one bad split into a poller log full of
+// identical injection errors.
+//
+// Every literal send in this package goes through here so the terminator
+// cannot be forgotten at a new call site.
+func (t *Tmux) sendKeysLiteral(target, text string) error {
+	_, err := t.run("send-keys", "-t", target, "-l", "--", text)
+	return err
+}
+
 func (t *Tmux) sendMessageToTarget(target, text string) error {
 	if len(text) <= sendKeysChunkSize {
 		return t.sendKeysLiteralWithRetry(target, text, constants.NudgeReadyTimeout)
@@ -1625,7 +1650,7 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 				return err
 			}
 		} else {
-			if _, err := t.run("send-keys", "-t", target, "-l", chunk); err != nil {
+			if err := t.sendKeysLiteral(target, chunk); err != nil {
 				return err
 			}
 		}
@@ -1656,7 +1681,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		err := t.sendKeysLiteral(target, text)
 		if err == nil {
 			return nil
 		}

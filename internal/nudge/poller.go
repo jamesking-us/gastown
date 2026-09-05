@@ -25,6 +25,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -116,8 +117,9 @@ func StopPoller(townRoot, session string) error {
 		return nil // corrupt PID file, clean up
 	}
 
-	if !pollerProcessAlive(pid) {
-		// Process already dead.
+	if !procutil.IsAlive(pid) {
+		// Already dead, or a zombie awaiting reap — either way there is
+		// nothing left to signal.
 		_ = os.Remove(pidPath)
 		return nil
 	}
@@ -140,6 +142,16 @@ func StopPoller(townRoot, session string) error {
 
 // pollerAlive checks if a poller is running for the given session.
 // Returns the PID and whether the process is alive.
+//
+// Liveness is decided by the process, never by the existence of the PID file.
+// The distinction is not academic: a poller that has exited but not yet been
+// reaped stays a zombie holding its PID, and a zombie answers a bare
+// kill(pid, 0) probe successfully. Under the old bare-signal check the corpse
+// read as alive, so StartPoller's "already running" fast path returned it and
+// the seat went without a poller until someone noticed by hand — measured on
+// gastown/witness (PID 3507, STAT=Z, dead 55 minutes while
+// .runtime/nudge_poller/gt-witness.pid still named it) and on a second witness
+// seat. procutil.IsAlive confirms the state is not zombie (cl-d77p).
 func pollerAlive(townRoot, session string) (int, bool) {
 	pidPath := pollerPidFile(townRoot, session)
 
@@ -153,8 +165,9 @@ func pollerAlive(townRoot, session string) (int, bool) {
 		return 0, false
 	}
 
-	if !pollerProcessAlive(pid) {
-		// Stale PID file — clean up.
+	if !procutil.IsAlive(pid) {
+		// Stale PID file, or a zombie the pidfile still names — clean up so
+		// the next StartPoller respawns instead of adopting the corpse.
 		_ = os.Remove(pidPath)
 		return 0, false
 	}
