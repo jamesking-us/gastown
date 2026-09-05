@@ -178,7 +178,9 @@ This command consolidates post-merge steps into a single atomic operation:
 	 1. Prove the submitted work landed on the target branch — by ancestry, or,
 	    for a rebased or squashed merge, by combined-diff patch-id
 	 2. Close the MR bead (status: merged)
-	 3. Close the source issue, unless it is only partly represented by this MR
+	 3. Close the source issue, unless it is only partly represented by this MR,
+	    or states its own release condition (stay_open/release_condition, or a
+	    gt:stay-open label) — a merge is not a release condition
 	 4. Delete the remote polecat branch at its current tip, which is accepted
 	    only once proven landed (unless --skip-branch-delete)
 
@@ -583,7 +585,7 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		fmt.Printf("  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(close skipped: --skip-issue-close)"))
 	case result.SourceIssueBlocked:
 		fmt.Printf("  %s Source issue NOT closed: %s (%s)\n", style.Warning.Render("!"), result.SourceIssueID, result.SourceIssueBlockReason)
-		fmt.Printf("    %s\n", style.Dim.Render("this MR does not represent the whole bead — close it by hand once the remaining work lands"))
+		fmt.Printf("    %s\n", style.Dim.Render(mqPostMergeBlockHint(result.SourceIssueBlockReason)))
 	case result.SourceIssueNotFound:
 		fmt.Printf("  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(already closed or not found)"))
 	}
@@ -610,6 +612,16 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// mqPostMergeBlockHint explains a deliberate refusal to close the source issue
+// in the terms of the signal that caused it: a bead holding itself open needs a
+// stated condition met, not the rest of its work landed.
+func mqPostMergeBlockHint(reason string) string {
+	if strings.HasPrefix(reason, "stay-open") {
+		return "the bead states its own release condition — leave it open until that condition is met; merging is not the condition"
+	}
+	return "this MR does not represent the whole bead — close it by hand once the remaining work lands"
 }
 
 func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete, skipIssueClose bool) (mqPostMergeOutcome, error) {

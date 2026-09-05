@@ -12,6 +12,8 @@ type fakeWorkBeadStore struct {
 	issues          map[string]*beads.Issue
 	children        map[string][]*beads.Issue
 	childrenErr     error
+	comments        map[string][]beads.Comment
+	commentsErr     error
 	closeCalls      []string
 	lastCloseReason string
 	closeErr        error
@@ -19,7 +21,18 @@ type fakeWorkBeadStore struct {
 }
 
 func newFakeWorkBeadStore() *fakeWorkBeadStore {
-	return &fakeWorkBeadStore{issues: map[string]*beads.Issue{}, children: map[string][]*beads.Issue{}}
+	return &fakeWorkBeadStore{issues: map[string]*beads.Issue{}, children: map[string][]*beads.Issue{}, comments: map[string][]beads.Comment{}}
+}
+
+func (f *fakeWorkBeadStore) addComment(id, text string) {
+	f.comments[id] = append(f.comments[id], beads.Comment{ID: id + "-c", IssueID: id, Text: text})
+}
+
+func (f *fakeWorkBeadStore) Comments(id string) ([]beads.Comment, error) {
+	if f.commentsErr != nil {
+		return nil, f.commentsErr
+	}
+	return f.comments[id], nil
 }
 
 func (f *fakeWorkBeadStore) addChild(parent string, child *beads.Issue) {
@@ -382,5 +395,161 @@ func TestCloseMergedWorkBead_UnreadableChildrenBlockClose(t *testing.T) {
 	}
 	if !result.Blocked || !strings.Contains(result.BlockReason, "inconclusive") {
 		t.Fatalf("result = %+v, want an inconclusive block", result)
+	}
+}
+
+func TestCloseMergedWorkBead_RefusesBeadStatingItsOwnReleaseCondition(t *testing.T) {
+	tests := []struct {
+		name       string
+		issue      *beads.Issue
+		wantReason string
+	}{
+		{
+			name:       "release condition in description",
+			issue:      &beads.Issue{ID: "gt-source", Type: "bug", Status: string(beads.StatusOpen), Description: "release_condition: closes on root-cause-found\n"},
+			wantReason: "stay-open: release_condition",
+		},
+		{
+			name:       "stay-open label",
+			issue:      &beads.Issue{ID: "gt-source", Type: "bug", Status: string(beads.StatusOpen), Labels: []string{"gt:stay-open"}},
+			wantReason: "stay-open: label:gt:stay-open",
+		},
+		{
+			name:       "condition in notes",
+			issue:      &beads.Issue{ID: "gt-source", Type: "bug", Status: string(beads.StatusOpen), Notes: "**Reopen condition:** any further auto-close"},
+			wantReason: "stay-open: reopen_condition",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			work := newFakeWorkBeadStore()
+			work.add(tt.issue)
+
+			result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{MRID: "gt-mr", SourceIssue: "gt-source"})
+
+			if result.Closed || !result.Blocked || result.BlockReason != tt.wantReason {
+				t.Fatalf("result = %+v, want blocked with %q", result, tt.wantReason)
+			}
+			if len(work.closeCalls) != 0 {
+				t.Fatalf("close calls = %v, want none", work.closeCalls)
+			}
+			if got := work.issues["gt-source"].Status; got != string(beads.StatusOpen) {
+				t.Fatalf("source status = %q, want open", got)
+			}
+		})
+	}
+}
+
+func TestCloseMergedWorkBead_RefusesConditionCarriedInComment(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-source", string(beads.StatusOpen)))
+	work.addComment("gt-source", "mayor ratified: stay_open: true until the RCA lands")
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{MRID: "gt-mr", SourceIssue: "gt-source"})
+
+	if result.Closed || !result.Blocked || result.BlockReason != "stay-open: comment:stay_open" {
+		t.Fatalf("result = %+v, want blocked by comment-carried condition", result)
+	}
+	if len(work.closeCalls) != 0 {
+		t.Fatalf("close calls = %v, want none", work.closeCalls)
+	}
+}
+
+func TestCloseMergedWorkBead_UnreadableCommentsBlockClose(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-source", string(beads.StatusOpen)))
+	work.commentsErr = errors.New("dolt unavailable")
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{MRID: "gt-mr", SourceIssue: "gt-source"})
+
+	if result.Closed || !result.Blocked || !strings.Contains(result.BlockReason, "stay-open-check-inconclusive") {
+		t.Fatalf("result = %+v, want inconclusive comment read to block", result)
+	}
+	if len(work.closeCalls) != 0 {
+		t.Fatalf("close calls = %v, want none", work.closeCalls)
+	}
+}
+
+func TestCloseMergedWorkBead_OrdinaryBeadStillClosesWithCommentsRead(t *testing.T) {
+	work := newFakeWorkBeadStore()
+	work.add(workIssue("gt-source", string(beads.StatusOpen)))
+	work.addComment("gt-source", "looks good to me")
+
+	result := closeMergedWorkBead(work, nil, nil, mergedWorkBeadCloseRequest{MRID: "gt-mr", SourceIssue: "gt-source"})
+
+	if !result.Closed || result.Blocked {
+		t.Fatalf("result = %+v, want ordinary close", result)
+	}
+	if len(work.closeCalls) != 1 || work.closeCalls[0] != "gt-source" {
+		t.Fatalf("close calls = %v, want [gt-source]", work.closeCalls)
+	}
+}
+
+type fakeAgentHookStore struct {
+	hooks      map[string]string
+	clearCalls []string
+	clearErr   error
+}
+
+func (f *fakeAgentHookStore) ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error) {
+	f.clearCalls = append(f.clearCalls, id+"->"+expectedHook)
+	if f.clearErr != nil {
+		return false, f.clearErr
+	}
+	if f.hooks[id] != expectedHook {
+		return false, nil
+	}
+	delete(f.hooks, id)
+	return true, nil
+}
+
+func TestReleaseMergedWorkHook_ClearsHookNamingTheMergedBead(t *testing.T) {
+	hooks := &fakeAgentHookStore{hooks: map[string]string{"gt-agent": "gt-source"}}
+	out := &strings.Builder{}
+
+	releaseMergedWorkHook(hooks, out, "gt-agent", "gt-source")
+
+	if _, still := hooks.hooks["gt-agent"]; still {
+		t.Fatalf("hook_bead still set: %+v", hooks.hooks)
+	}
+	if !strings.Contains(out.String(), "Released hook on gt-agent") {
+		t.Fatalf("output = %q, want the release reported", out.String())
+	}
+}
+
+func TestReleaseMergedWorkHook_LeavesAWorkerThatMovedOn(t *testing.T) {
+	hooks := &fakeAgentHookStore{hooks: map[string]string{"gt-agent": "gt-next"}}
+	out := &strings.Builder{}
+
+	releaseMergedWorkHook(hooks, out, "gt-agent", "gt-source")
+
+	if hooks.hooks["gt-agent"] != "gt-next" {
+		t.Fatalf("hook_bead = %q, want gt-next untouched", hooks.hooks["gt-agent"])
+	}
+	if out.String() != "" {
+		t.Fatalf("output = %q, want silence when nothing was cleared", out.String())
+	}
+}
+
+func TestReleaseMergedWorkHook_IgnoresMissingIDs(t *testing.T) {
+	hooks := &fakeAgentHookStore{hooks: map[string]string{"gt-agent": "gt-source"}}
+
+	releaseMergedWorkHook(hooks, nil, "", "gt-source")
+	releaseMergedWorkHook(hooks, nil, "gt-agent", "")
+
+	if len(hooks.clearCalls) != 0 {
+		t.Fatalf("clear calls = %v, want none", hooks.clearCalls)
+	}
+}
+
+func TestReleaseMergedWorkHook_ReportsClearFailure(t *testing.T) {
+	hooks := &fakeAgentHookStore{hooks: map[string]string{"gt-agent": "gt-source"}, clearErr: errors.New("dolt unavailable")}
+	out := &strings.Builder{}
+
+	releaseMergedWorkHook(hooks, out, "gt-agent", "gt-source")
+
+	if !strings.Contains(out.String(), "failed to clear hook_bead") {
+		t.Fatalf("output = %q, want the failure reported", out.String())
 	}
 }

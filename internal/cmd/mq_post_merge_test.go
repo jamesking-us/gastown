@@ -422,3 +422,18 @@ func TestRunVerifiedMQPostMerge_SkipIssueClosePassesThrough(t *testing.T) {
 		t.Fatalf("PostMergeMR options = %+v, want SkipSourceIssueClose", mgr.postMergeOpts)
 	}
 }
+
+func TestMQPostMergeBlockHint_NamesTheSignalThatBlocked(t *testing.T) {
+	stayOpen := mqPostMergeBlockHint("stay-open: release_condition")
+	if !strings.Contains(stayOpen, "release condition") {
+		t.Errorf("stay-open hint = %q, want it to name the bead's own release condition", stayOpen)
+	}
+	inconclusive := mqPostMergeBlockHint("stay-open-check-inconclusive: cannot read comments of gt-a: boom")
+	if inconclusive != stayOpen {
+		t.Errorf("inconclusive hint = %q, want the stay-open hint %q", inconclusive, stayOpen)
+	}
+	split := mqPostMergeBlockHint("split: 1 open child issue(s): gt-b")
+	if !strings.Contains(split, "whole bead") {
+		t.Errorf("split hint = %q, want the partly-merged hint", split)
+	}
+}

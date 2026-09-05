@@ -646,3 +646,72 @@ esac
 		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
 	}
 }
+
+func TestClearAgentHookBeadIfMatchesClearsExactMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-work"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentHookBeadIfMatches("gt-gastown-polecat-nux", "gt-work")
+	if err != nil {
+		t.Fatalf("ClearAgentHookBeadIfMatches: %v", err)
+	}
+	if !cleared {
+		t.Fatal("ClearAgentHookBeadIfMatches cleared = false, want true")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if !strings.Contains(logOutput, "show gt-gastown-polecat-nux --json") || !strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q missing show/update", logOutput)
+	}
+}
+
+func TestClearAgentHookBeadIfMatchesNoopsWhenDifferent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-other"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentHookBeadIfMatches("gt-gastown-polecat-nux", "gt-work")
+	if err != nil {
+		t.Fatalf("ClearAgentHookBeadIfMatches: %v", err)
+	}
+	if cleared {
+		t.Fatal("ClearAgentHookBeadIfMatches cleared = true, want false")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q unexpectedly updated a hook that names other work", logOutput)
+	}
+}
+
+func TestClearAgentHookBeadIfMatchesRejectsNonAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	installMockBDShowRecorder(t, `[{"id":"gt-task","title":"Task","issue_type":"task","labels":["gt:task"],"description":"hook_bead: gt-work"}]`)
+	bd := NewIsolated(tmpDir)
+
+	if _, err := bd.ClearAgentHookBeadIfMatches("gt-task", "gt-work"); err == nil {
+		t.Fatal("ClearAgentHookBeadIfMatches error = nil, want rejection of non-agent bead")
+	}
+}
