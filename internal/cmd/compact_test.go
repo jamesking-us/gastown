@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -301,4 +303,89 @@ func compactSourceBetween(t *testing.T, source, startMarker, endMarker string) s
 		t.Fatalf("could not find %q after %q", endMarker, startMarker)
 	}
 	return source[start : start+end]
+}
+
+// setupExpiredWispStub puts a fake `bd` on PATH that reports one closed wisp
+// far past its TTL — a live delete candidate — and logs every invocation.
+// Returns the path to that log.
+func setupExpiredWispStub(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+
+	bdScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_ARGS_LOG"
+case "$1" in
+  list)
+    printf '[{"id":"hq-wisp-expired","title":"stale heartbeat","status":"closed","issue_type":"chore","ephemeral":true,"wisp_type":"heartbeat","created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z"}]\n'
+    ;;
+  delete)
+    exit 0
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", bdLog)
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+	return bdLog
+}
+
+func readBdArgsLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read bd args log: %v", err)
+	}
+	return string(data)
+}
+
+func TestPerformCompactionDryRunDoesNotDelete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	bdLog := setupExpiredWispStub(t)
+
+	result, err := performCompaction(compactOptions{DryRun: true, Quiet: true})
+	if err != nil {
+		t.Fatalf("performCompaction: %v", err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0].ID != "hq-wisp-expired" {
+		t.Fatalf("Deleted = %#v, want the expired wisp reported as a would-delete", result.Deleted)
+	}
+	if args := readBdArgsLog(t, bdLog); strings.Contains(args, "delete") {
+		t.Fatalf("dry run issued bd delete:\n%s", args)
+	}
+}
+
+// Paired negative control for TestPerformCompactionDryRunDoesNotDelete: with
+// DryRun off the same wisp IS deleted, so the test above is measuring the
+// dry-run guard rather than an empty candidate set.
+func TestPerformCompactionDeletesExpiredWispWhenNotDryRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	bdLog := setupExpiredWispStub(t)
+
+	result, err := performCompaction(compactOptions{Quiet: true})
+	if err != nil {
+		t.Fatalf("performCompaction: %v", err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0].ID != "hq-wisp-expired" {
+		t.Fatalf("Deleted = %#v, want the expired wisp deleted", result.Deleted)
+	}
+	args := readBdArgsLog(t, bdLog)
+	if !strings.Contains(args, "delete hq-wisp-expired --force") {
+		t.Fatalf("bd delete --force was not issued:\n%s", args)
+	}
 }

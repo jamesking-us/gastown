@@ -528,13 +528,21 @@ func TestDeaconPatrolCarriesServedWispProtections(t *testing.T) {
 	// which branches before runDailyDigest and never compacts, stays runnable.
 	//
 	// NOTE the served-wisp text this block was carried from recommended
-	// `gt compact report --dry-run` as a read-only substitute. It is not one:
-	// runDailyDigest shells out to `gt compact --json` (compact_report.go:160)
-	// as a separate process with no --dry-run, thirty-six lines before its own
-	// dry-run guard (:196), so the subprocess reaches deleteWisp's
-	// `bd delete --force` (compact.go:393). Carrying that claim into source
-	// would have made a false safety claim durable, so it was corrected here
-	// rather than reproduced. Tracked for a tooling split on hq-la3m.
+	// `gt compact report --dry-run` as a read-only substitute. When carried it
+	// was not one: runDailyDigest shelled out to `gt compact --json` as a
+	// separate process with no --dry-run, thirty-six lines before its own
+	// dry-run guard, so the subprocess reached deleteWisp's
+	// `bd delete --force`. Carrying that claim into source would have made a
+	// false safety claim durable, so it was corrected here rather than
+	// reproduced. Tracked for a tooling split on hq-la3m.
+	//
+	// gt-h7z has since fixed the source: compaction runs in-process under a
+	// single compactOptions.DryRun, and TestRunDailyDigestDryRunPerformsNoDeletes
+	// holds it there. THE BAN BELOW STAYS ANYWAY, and this test still enforces
+	// it. Agents invoke the installed `gt`, not this tree, and lifting the
+	// prohibition is the mayor's call — relaxing the formula text on the
+	// strength of a source fix would hand a still-broken binary a safety claim
+	// it does not have.
 	requirePresent("compact-report",
 		"BANNED IN ITS MUTATING FORM",
 		"hq-gk8d",

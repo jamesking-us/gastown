@@ -668,3 +668,99 @@ func assertNoMailSent(t *testing.T, mailLog string) {
 		t.Fatalf("mail was sent unexpectedly: %s", string(data))
 	}
 }
+
+// TestRunDailyDigestDryRunPerformsNoDeletes is the positive control for
+// gt-h7z: `gt compact report --dry-run` must not mutate anything.
+//
+// The failure it guards against is silent. When the report shelled out to
+// `gt compact --json`, --dry-run stopped at the process boundary and the
+// child deleted closed wisps past TTL with `bd delete --force`; the dry-run
+// check in runDailyDigest ran later and gated only the printing.
+//
+// Two details of the setup are load-bearing:
+//   - No compaction event exists for the date, so the findExistingCompactReport
+//     idempotency short-circuit is NOT what protects the wisp. Running this
+//     against a date whose digest already exists passes on broken code.
+//   - The wisp is closed and far past any TTL, so it is a live delete
+//     candidate. An empty candidate set would also pass on broken code.
+func TestRunDailyDigestDryRunPerformsNoDeletes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
+
+	bdScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_ARGS_LOG"
+case "$1" in
+  list)
+    case "$*" in
+      *--type=event*)
+        printf '[]\n'
+        ;;
+      *)
+        printf '[{"id":"hq-wisp-expired","title":"stale heartbeat","status":"closed","issue_type":"chore","ephemeral":true,"wisp_type":"heartbeat","created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z"}]\n'
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	// Any `gt` invocation is itself a regression: compaction must run
+	// in-process so one dry-run value governs it.
+	gtScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$GT_ARGS_LOG"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", bdLog)
+	t.Setenv("GT_ARGS_LOG", gtLog)
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+
+	resetCompactReportFlags(t)
+	compactReportDryRun = true
+	compactReportDate = "2026-05-15"
+
+	if err := runDailyDigest(); err != nil {
+		t.Fatalf("runDailyDigest: %v", err)
+	}
+
+	bdArgs := readStubLog(t, bdLog)
+	if !strings.Contains(bdArgs, "list") {
+		t.Fatalf("bd was never asked to list wisps; the test proved nothing:\n%s", bdArgs)
+	}
+	for _, banned := range []string{"delete", "update", "sql", "comments"} {
+		if strings.Contains(bdArgs, banned) {
+			t.Errorf("--dry-run ran a mutating bd %s:\n%s", banned, bdArgs)
+		}
+	}
+	if gtArgs := readStubLog(t, gtLog); gtArgs != "" {
+		t.Errorf("--dry-run shelled out to gt (compaction must be in-process):\n%s", gtArgs)
+	}
+}
+
+func readStubLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read stub log %s: %v", path, err)
+	}
+	return string(data)
+}

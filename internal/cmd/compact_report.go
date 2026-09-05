@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -110,14 +109,14 @@ beads and sends trend data to mayor/.
 
 Examples:
   gt compact report              # Run compaction + send daily digest
-  gt compact report --dry-run    # Preview the report without sending
+  gt compact report --dry-run    # Preview only: no compaction, no mail
   gt compact report --weekly     # Send weekly rollup to mayor/
   gt compact report --json       # Output report as JSON`,
 	RunE: runCompactReport,
 }
 
 func init() {
-	compactReportCmd.Flags().BoolVar(&compactReportDryRun, "dry-run", false, "Preview report without sending")
+	compactReportCmd.Flags().BoolVar(&compactReportDryRun, "dry-run", false, "Preview report without compacting or sending")
 	compactReportCmd.Flags().BoolVar(&compactReportWeekly, "weekly", false, "Generate weekly rollup instead of daily digest")
 	compactReportCmd.Flags().BoolVarP(&compactReportVerbose, "verbose", "v", false, "Verbose output")
 	compactReportCmd.Flags().StringVar(&compactReportDate, "date", "", "Report for specific date (YYYY-MM-DD); default: today")
@@ -156,15 +155,23 @@ func runDailyDigest() error {
 		return nil
 	}
 
-	// Run compaction with --json to get results
-	compactOut, err := exec.Command("gt", "compact", "--json").Output()
+	// Run compaction in-process so that --dry-run governs the compaction
+	// itself, not just the digest that is printed afterwards.
+	//
+	// This used to be exec.Command("gt", "compact", "--json"). The flag was
+	// not propagated across the process boundary, so the child ran with
+	// compactDryRun=false and `gt compact report --dry-run` performed a real
+	// compaction — reaching `bd delete --force` on closed wisps past TTL
+	// (gt-h7z). The dry-run guard 30-odd lines below gated only the printing;
+	// the deletions had already happened. Keep this call in-process: one
+	// dry-run value must govern both the compaction and the report.
+	result, err := performCompaction(compactOptions{
+		DryRun: compactReportDryRun,
+		Quiet:  true,
+		Rig:    compactRig,
+	})
 	if err != nil {
 		return fmt.Errorf("running compaction: %w", err)
-	}
-
-	var result compactResult
-	if err := json.Unmarshal(extractJSONObject(compactOut), &result); err != nil {
-		return fmt.Errorf("parsing compaction output: %w", err)
 	}
 
 	// Query active wisps for the "Active" column
@@ -179,7 +186,7 @@ func runDailyDigest() error {
 	}
 
 	// Build report
-	report := buildReport(dateStr, &result, activeWisps)
+	report := buildReport(dateStr, result, activeWisps)
 
 	// Detect anomalies
 	report.Anomalies = detectAnomalies(report)
@@ -714,16 +721,6 @@ func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
 		}
 	}
 	return "", nil
-}
-
-// extractJSONObject finds the first '{' byte in data and returns from that
-// point onward. Strips non-JSON prefix from subprocess output.
-func extractJSONObject(data []byte) []byte {
-	idx := bytes.IndexByte(data, '{')
-	if idx < 0 {
-		return data
-	}
-	return data[idx:]
 }
 
 // createWeeklyRollupBead creates a permanent audit bead for the weekly rollup.
