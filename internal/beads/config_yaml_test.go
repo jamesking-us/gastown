@@ -274,3 +274,124 @@ func TestEnsureConfigYAML_LeavesNestedRoutingBlockAlone(t *testing.T) {
 		t.Fatalf("nested routing block was disturbed: %q", got)
 	}
 }
+
+func TestEnsureConfigYAML_EmptyPrefixLeavesPrefixLinesIntact(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	original := "prefix: gt\nissue-prefix: gt\n"
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	// This is the 'gt doctor --fix' idle-timeout call shape: it wants the
+	// non-prefix defaults and must not touch the routing prefixes (gt-7pn).
+	if err := EnsureConfigYAML(beadsDir, ""); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "prefix: gt\n") || !strings.Contains(got, "issue-prefix: gt\n") {
+		t.Fatalf("prefix lines were rewritten: %q", got)
+	}
+	if strings.Contains(got, "prefix: \n") || strings.Contains(got, "prefix:\n") {
+		t.Fatalf("config.yaml has a blank prefix line: %q", got)
+	}
+	if !strings.Contains(got, "dolt.idle-timeout: \"0\"\n") {
+		t.Fatalf("config.yaml missing idle-timeout default: %q", got)
+	}
+}
+
+func TestEnsureConfigYAML_EmptyPrefixDoesNotAddBlankPrefixLines(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("export.auto: \"false\"\n"), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, ""); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "prefix:") {
+		t.Fatalf("empty prefix was written into config.yaml: %q", got)
+	}
+	if !strings.Contains(got, "dolt.idle-timeout: \"0\"\n") {
+		t.Fatalf("config.yaml missing idle-timeout default: %q", got)
+	}
+}
+
+func TestEnsureConfigYAML_EmptyPrefixCreatesConfigWithoutPrefixKeys(t *testing.T) {
+	beadsDir := t.TempDir()
+
+	if err := EnsureConfigYAML(beadsDir, ""); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "prefix:") {
+		t.Fatalf("new config.yaml has a blank prefix line: %q", got)
+	}
+	if !strings.Contains(got, "dolt.idle-timeout: \"0\"\n") || !strings.Contains(got, "export.auto: \"false\"\n") {
+		t.Fatalf("new config.yaml missing defaults: %q", got)
+	}
+}
+
+func TestEnsureConfigYAML_NonEmptyPrefixStillWritesPrefixKeys(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("prefix: old\nissue-prefix: old\n"), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "gt"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "prefix: gt\n") || !strings.Contains(got, "issue-prefix: gt\n") {
+		t.Fatalf("prefix keys not updated: %q", got)
+	}
+	if strings.Contains(got, "prefix: old") {
+		t.Fatalf("stale prefix left behind: %q", got)
+	}
+}
+
+func TestEnsureConfigYAMLValue_RefusesEmptyPrefixKeys(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	original := "prefix: gt\nissue-prefix: gt\n"
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	for _, key := range []string{"prefix", "issue-prefix"} {
+		if err := EnsureConfigYAMLValue(beadsDir, key, ""); err == nil {
+			t.Fatalf("EnsureConfigYAMLValue(%q, \"\") = nil, want error", key)
+		}
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if string(after) != original {
+		t.Fatalf("config.yaml changed:\n got: %q\nwant: %q", string(after), original)
+	}
+}
