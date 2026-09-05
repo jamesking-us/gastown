@@ -29,7 +29,7 @@ func TestDeleteWispRecordsTheDeletionFirst(t *testing.T) {
 
 	result := &compactResult{}
 	deleteWisp(beads.New(t.TempDir()), compactWisp("hq-wisp-aaa", "deacon patrol cycle 4"),
-		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"})
+		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"}, compactOptions{})
 
 	if len(result.Deleted) != 1 {
 		t.Fatalf("Deleted = %v, want the wisp deleted", result.Deleted)
@@ -82,7 +82,7 @@ func TestDeleteWispSkipsWhenTheDeletionCannotBeRecorded(t *testing.T) {
 
 	result := &compactResult{}
 	deleteWisp(beads.New(t.TempDir()), compactWisp("hq-wisp-aaa", "deacon patrol cycle 4"),
-		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"})
+		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"}, compactOptions{})
 
 	for _, c := range calls() {
 		if strings.Contains(c, "delete ") {
@@ -101,12 +101,10 @@ func TestDeleteWispSkipsWhenTheDeletionCannotBeRecorded(t *testing.T) {
 func TestDeleteWispDryRunRecordsNothing(t *testing.T) {
 	eventsPath := townRootForEvents(t)
 	calls := recordingBD(t, "[]")
-	compactDryRun = true
-	t.Cleanup(func() { compactDryRun = false })
 
 	result := &compactResult{}
 	deleteWisp(beads.New(t.TempDir()), compactWisp("hq-wisp-aaa", "cycle"),
-		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"})
+		"TTL expired", result, compactAudit{actor: "hq/deacon", db: "hq"}, compactOptions{DryRun: true})
 
 	for _, c := range calls() {
 		if strings.Contains(c, "delete ") {
