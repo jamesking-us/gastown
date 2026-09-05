@@ -168,18 +168,20 @@ func setupSchedulerPartialScanTown(t *testing.T, workBeadID string) string {
 	}
 	contextJSON := fmt.Sprintf(`[{"id":"ctx-healthy","title":"sling-context: %s","status":"open","description":%s}]`,
 		workBeadID, strconv.Quote(beads.FormatSlingContextDescription(fields)))
-	// Only the context listing fails in the rig dir; work-bead lookups stay
-	// healthy so the test isolates the walk's tolerance, not bd routing.
+	// bd is invoked with --allow-stale prepended, so match on the whole
+	// argument list, not $1. Only the context listing fails in the rig dir;
+	// work-bead lookups stay healthy so the test isolates the walk's
+	// tolerance rather than bd routing.
 	installFakeBD(t, `#!/bin/sh
-case "$1" in
-  query)
+case "$*" in
+  *query*)
     case "$BEADS_DIR" in
       */rig/.beads) echo "issue not found" >&2; exit 1 ;;
     esac
     printf '%s\n' '`+contextJSON+`'
     ;;
-  show)  printf '%s\n' '[{"id":"`+workBeadID+`","title":"work","status":"open","labels":[]}]' ;;
-  *)     printf '[]\n' ;;
+  *show*) printf '%s\n' '[{"id":"`+workBeadID+`","title":"work","status":"open","labels":[]}]' ;;
+  *)      printf '[]\n' ;;
 esac
 exit 0
 `)
@@ -250,5 +252,38 @@ func TestSkippedContextInfosNamesDirAndReason(t *testing.T) {
 	})
 	if len(infos) != 1 || infos[0].BeadsDir != "/gt/forkrig/.beads" || infos[0].Error != "issue not found" {
 		t.Fatalf("skippedContextInfos = %+v, want dir and reason preserved for --json consumers", infos)
+	}
+}
+
+// TestRunSchedulerStatusSkipsUnresolvableContextWithZeroExit is the regression
+// the witness saw: `gt scheduler status` is the first step of every SLOT_OPEN
+// dispatch trigger, and one unresolvable context used to exit it 1 town-wide.
+func TestRunSchedulerStatusSkipsUnresolvableContextWithZeroExit(t *testing.T) {
+	townRoot := setupSchedulerPartialScanTown(t, "gt-work")
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
+	oldJSON := schedulerStatusJSON
+	schedulerStatusJSON = false
+	t.Cleanup(func() { schedulerStatusJSON = oldJSON })
+
+	var statusErr error
+	out := captureStdout(t, func() { statusErr = runSchedulerStatus(nil, nil) })
+	if statusErr != nil {
+		t.Fatalf("scheduler status failed on one unresolvable context: %v", statusErr)
+	}
+	if !strings.Contains(out, filepath.Join("rig", ".beads")) {
+		t.Fatalf("status output = %q, want the skipped context named", out)
+	}
+	if !strings.Contains(out, "unresolvable sling context") {
+		t.Fatalf("status output = %q, want the skip reported", out)
+	}
+	if !strings.Contains(out, "Scheduled: 1 total") {
+		t.Fatalf("status output = %q, want the resolvable context still counted", out)
 	}
 }
