@@ -189,3 +189,88 @@ func TestConfigYAMLDisablesAutoExport(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsureConfigYAML_PinsRoutingModeExplicit(t *testing.T) {
+	beadsDir := t.TempDir()
+
+	if err := EnsureConfigYAML(beadsDir, "gt"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "routing.mode: \"explicit\"\n") {
+		t.Fatalf("new config.yaml missing routing.mode default: %q", string(data))
+	}
+}
+
+func TestEnsureConfigYAML_AddsRoutingModeToExistingConfig(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("prefix: gt\nissue-prefix: gt\n"), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "gt"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "routing.mode: \"explicit\"\n") {
+		t.Fatalf("existing config.yaml not repaired: %q", string(data))
+	}
+}
+
+func TestEnsureConfigYAML_RewritesNonExplicitRoutingMode(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("prefix: gt\nrouting.mode: auto\n"), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "gt"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "routing.mode: auto") {
+		t.Fatalf("auto routing mode survived: %q", got)
+	}
+	if strings.Count(got, "routing.mode:") != 1 {
+		t.Fatalf("expected exactly one routing.mode line: %q", got)
+	}
+}
+
+func TestEnsureConfigYAML_LeavesNestedRoutingBlockAlone(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	original := "prefix: hq\nissue-prefix: hq\nrouting:\n    mode: explicit\n"
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "routing.mode:") {
+		t.Fatalf("flat routing.mode duplicated a nested routing block: %q", got)
+	}
+	if !strings.Contains(got, "routing:\n    mode: explicit\n") {
+		t.Fatalf("nested routing block was disturbed: %q", got)
+	}
+}

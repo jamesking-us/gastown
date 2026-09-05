@@ -144,6 +144,21 @@ func ConfigYAMLDisablesAutoExport(content string) bool {
 	return false
 }
 
+// hasNestedYAMLKey reports whether lines contain a top-level mapping key of the
+// given name written in nested form, e.g. "routing:" followed by indented
+// children. Flat dotted keys ("routing.mode: explicit") do not count.
+func hasNestedYAMLKey(lines []string, key string) bool {
+	for _, line := range lines {
+		if line != strings.TrimLeft(line, " \t") {
+			continue // indented: a child, not a top-level key
+		}
+		if strings.TrimSpace(line) == key+":" {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	wantPrefix := "prefix: " + prefix
@@ -153,11 +168,19 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	// Gas Town stores beads in Dolt/server-mode runtime directories that are often
 	// redirected or gitignored; bd's post-run auto-export git-add is noisy there.
 	wantExportAuto := "export.auto: \"false\""
+	// Every Gas Town seat reads and writes its own rig store. bd's default
+	// routing mode is "auto", which picks a target from routing.contributor /
+	// routing.maintainer using a git-remote heuristic — on a fork-backed rig
+	// that resolves to "contributor" and sends both reads and writes to an
+	// off-rig store. Pinning explicit mode here also shadows any stale
+	// routing.* row left in the beads database, which config.yaml outranks but
+	// `bd config get`/`unset` cannot see or remove. (gt-sym)
+	wantRoutingMode := "routing.mode: \"explicit\""
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		// New config: include all Gas Town defaults
-		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantExportAuto + "\n"
+		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantExportAuto + "\n" + wantRoutingMode + "\n"
 		return os.WriteFile(configPath, []byte(content), 0644)
 	}
 	if err != nil {
@@ -173,9 +196,19 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	foundIssuePrefix := false
 	foundIdleTimeout := false
 	foundExportAuto := false
+	// A nested "routing:" mapping expresses the same setting as the flat
+	// routing.mode key; appending the flat form alongside it would leave the
+	// file with two definitions of one setting, so leave nested files alone and
+	// let `gt doctor`'s routing-mode check report what they resolve to.
+	foundRoutingMode := hasNestedYAMLKey(lines, "routing")
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "routing.mode:") {
+			lines[i] = wantRoutingMode
+			foundRoutingMode = true
+			continue
+		}
 		if strings.HasPrefix(trimmed, "prefix:") {
 			lines[i] = wantPrefix
 			foundPrefix = true
@@ -209,6 +242,9 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	}
 	if !foundExportAuto {
 		lines = append(lines, wantExportAuto)
+	}
+	if !foundRoutingMode {
+		lines = append(lines, wantRoutingMode)
 	}
 
 	newContent := strings.Join(lines, "\n")
