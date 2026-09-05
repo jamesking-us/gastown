@@ -291,7 +291,8 @@ func refineryStayOpenWorkBeadReason(work workBeadCloser, issue *beads.Issue) str
 	if err != nil {
 		// An unanswerable question is not a pass: the condition may be sitting in
 		// the comments this read failed to fetch. Post-merge is retryable, and a
-		// bead left open is recoverable in a way a false close is not.
+		// bead left open is recoverable in a way a false close is not. gt done's
+		// review-evidence path treats a failed comment read the same way.
 		return fmt.Sprintf("stay-open-check-inconclusive: cannot read comments of %s: %v", issue.ID, err)
 	}
 	for _, comment := range comments {
