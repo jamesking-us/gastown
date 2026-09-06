@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,10 +114,11 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 		}
 	}
 
-	assessments, blockedErr := assessScheduledContexts(townRoot)
+	assessments, scanFailures, blockedErr := assessScheduledContexts(townRoot)
 	if blockedErr != nil {
 		return nil, blockedErr
 	}
+	reportSlingContextScanFailures(scanFailures)
 
 	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
 	if cleanup {
@@ -422,7 +424,9 @@ func beadsForContextRecord(rec slingContextRecord) *beads.Beads {
 // cleanupStaleContexts closes invalid and stale sling context beads.
 // Called explicitly before the dispatch cycle to separate cleanup from querying.
 func cleanupStaleContexts(townRoot string) error {
-	contexts, err := listAllSlingContextRecords(townRoot)
+	// Scan failures are not reported here: the only caller reports the same
+	// failures a moment later, off the assessment walk.
+	contexts, _, err := scanAllSlingContextRecords(townRoot)
 	if err != nil {
 		return err
 	}
@@ -577,13 +581,16 @@ func groupBeadIDsByResolvedBeadsDir(townRoot string, ids []string) map[string][]
 	return idsByBeadsDir
 }
 
-func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, error) {
-	contexts, err := listAllSlingContextRecords(townRoot)
+// assessScheduledContexts reconciles every readable sling context with its work
+// bead. Unresolvable contexts are returned as scan failures rather than aborting
+// the assessment, so one broken context dir cannot blank the whole listing.
+func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, []slingContextScanFailure, error) {
+	contexts, failures, err := scanAllSlingContextRecords(townRoot)
 	if err != nil {
-		return nil, err
+		return nil, failures, err
 	}
 	if len(contexts) == 0 {
-		return nil, nil
+		return nil, failures, nil
 	}
 
 	candidates := make([]scheduledContextAssessment, 0, len(contexts))
@@ -600,7 +607,7 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		workBeadIDs = append(workBeadIDs, fields.WorkBeadID)
 	}
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, failures, nil
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -633,7 +640,7 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		assessments = append(assessments, candidate)
 	}
 
-	return assessments, blockedErr
+	return assessments, failures, blockedErr
 }
 
 // getReadySlingContexts queries for sling context beads whose work beads are ready.
@@ -643,10 +650,11 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 // Sling contexts are scanned from HQ and rig DBs. Work bead readiness is checked
 // by source ID so context location and source readiness cannot diverge.
 func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
-	assessments, blockedErr := assessScheduledContexts(townRoot)
+	assessments, scanFailures, blockedErr := assessScheduledContexts(townRoot)
 	if blockedErr != nil {
 		return nil, blockedErr
 	}
+	reportSlingContextScanFailures(scanFailures)
 	return readySlingContextsFromAssessments(assessments), nil
 }
 
@@ -817,8 +825,8 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 // listAllSlingContexts returns all open sling context beads across all rig
 // beads dirs. Sling contexts are created in the target rig's beads dir
 // (GH#3468), so we scan HQ plus all rig dirs.
-// Used by scheduler list/status/clear, cleanupStaleContexts, and areScheduled.
-// Does NOT filter by readiness or circuit breaker.
+// Fail-closed: used by areScheduled, where a partial view would let a bead be
+// scheduled twice. Does NOT filter by readiness or circuit breaker.
 //
 // Deduplicates by context ID: different search dirs can resolve to the same
 // underlying beads DB (e.g., when a rig's top-level .beads is a redirect to
@@ -835,19 +843,65 @@ func listAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
 	return all, nil
 }
 
-func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
+// slingContextScanFailure names one sling-context search dir that could not be
+// listed, with the reason. Carried out of the walk so callers can report the
+// broken context by name instead of collapsing the whole listing into one error.
+type slingContextScanFailure struct {
+	workDir  string
+	beadsDir string
+	err      error
+}
+
+func (f slingContextScanFailure) Error() string {
+	return fmt.Sprintf("listing sling contexts in %s: %v", f.beadsDir, f.err)
+}
+
+// slingContextScanFailuresError folds per-context failures into a single error
+// for the callers that must still fail closed (idempotency and clear).
+func slingContextScanFailuresError(failures []slingContextScanFailure) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(failures))
+	for _, f := range failures {
+		msgs = append(msgs, f.Error())
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// reportSlingContextScanFailures prints one warning line per unresolvable sling
+// context so a skipped context is always named with its reason, never silent.
+func reportSlingContextScanFailures(failures []slingContextScanFailure) {
+	for _, f := range failures {
+		fmt.Fprintf(os.Stderr, "%s Warning: skipping unresolvable sling context dir %s: %v\n",
+			style.Dim.Render("⚠"), f.beadsDir, f.err)
+	}
+}
+
+// scanAllSlingContextRecords walks every sling-context search dir and returns
+// the contexts it could read plus one failure entry per dir it could not.
+//
+// The walk is skip-and-report, never abort-all: a single unresolvable context
+// (e.g. a stub .beads dir naming a Dolt database that does not exist) must not
+// be able to take down the town-wide listing and, with it, every SLOT_OPEN
+// dispatch trigger. Only two conditions are hard errors: the search dirs cannot
+// be enumerated at all, and every single dir failed (a systemic outage, where
+// an empty result would falsely read as "nothing scheduled").
+func scanAllSlingContextRecords(townRoot string) ([]slingContextRecord, []slingContextScanFailure, error) {
 	var records []slingContextRecord
+	var failures []slingContextScanFailure
 	seen := make(map[string]bool)
 	dirs, err := beadsSearchDirs(townRoot)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, dir := range dirs {
 		beadsDir := beads.ResolveBeadsDir(dir)
 		b := beads.NewWithBeadsDir(dir, beadsDir)
 		contexts, err := b.ListOpenSlingContexts()
 		if err != nil {
-			return nil, fmt.Errorf("listing sling contexts in %s: %w", beadsDir, err)
+			failures = append(failures, slingContextScanFailure{workDir: dir, beadsDir: beadsDir, err: err})
+			continue
 		}
 		for _, ctx := range contexts {
 			key := beadsDir + "\x00" + ctx.ID
@@ -857,6 +911,24 @@ func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
 			seen[key] = true
 			records = append(records, slingContextRecord{issue: ctx, workDir: dir, beadsDir: beadsDir})
 		}
+	}
+	if len(dirs) > 0 && len(failures) == len(dirs) {
+		return nil, failures, fmt.Errorf("all %d sling context scans failed: %w", len(failures), slingContextScanFailuresError(failures))
+	}
+	return records, failures, nil
+}
+
+// listAllSlingContextRecords is the fail-closed wrapper around the walk: any
+// unresolvable context is an error. Used where a partial view is unsafe —
+// scheduling idempotency (areScheduled) and `gt scheduler clear`, both of which
+// would otherwise act as if invisible contexts did not exist.
+func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
+	records, failures, err := scanAllSlingContextRecords(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	if failErr := slingContextScanFailuresError(failures); failErr != nil {
+		return nil, failErr
 	}
 	return records, nil
 }
