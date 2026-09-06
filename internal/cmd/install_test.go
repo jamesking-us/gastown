@@ -257,7 +257,7 @@ func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
 	}
 
 	got := string(data)
-	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\nexport.auto: \"false\"\n"
+	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\nexport.auto: \"false\"\nrouting.mode: \"explicit\"\n"
 	if got != want {
 		t.Fatalf("config.yaml = %q, want %q", got, want)
 	}
