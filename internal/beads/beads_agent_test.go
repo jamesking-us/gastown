@@ -715,3 +715,77 @@ func TestClearAgentHookBeadIfMatchesRejectsNonAgent(t *testing.T) {
 		t.Fatal("ClearAgentHookBeadIfMatches error = nil, want rejection of non-agent bead")
 	}
 }
+
+// TestListAgentBeadsQueriesTownDatabase pins the invariant that broke in gt-ega:
+// the agent-bead lister must open the same database the getter opens. Agent
+// beads live in the town/hq database, so a wrapper rooted at a rig must route
+// there. When only GetAgentBead routed, beads.New(rigPath).ListAgentBeads()
+// returned an empty map from the rig database while GetAgentBead found every
+// bead, and every caller that reads fields out of that map (gt polecat list,
+// the capacity snapshot) concluded "no agent metadata recorded" and pinned each
+// idle polecat at cleanup_status=<missing> / NEEDS_RECOVERY indefinitely.
+func TestListAgentBeadsQueriesTownDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir town .beads: %v", err)
+	}
+	rigDir := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	beadsDirLog := filepath.Join(stubDir, "beads-dir.txt")
+	// The stub models the real topology: the agent bead exists in the town
+	// database and the rig database holds none. Match on the whole argument
+	// list, not $1 — run() injects --flat and may prepend --allow-stale, so the
+	// subcommand is not reliably the first argument.
+	stub := "#!/bin/sh\n" +
+		"echo \"$BEADS_DIR\" >> " + beadsDirLog + "\n" +
+		"case \"$*\" in\n" +
+		"  *--label=gt:agent*)\n" +
+		"    if [ \"$BEADS_DIR\" = " + townBeadsDir + " ]; then\n" +
+		"      echo '[{\"id\":\"tr-testrig-polecat-capable\",\"issue_type\":\"agent\",\"labels\":[\"gt:agent\"],\"description\":\"cleanup_status: clean\"}]'\n" +
+		"    else\n" +
+		"      echo '[]'\n" +
+		"    fi ;;\n" +
+		"  *) echo '{}' ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stub), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	agents, err := New(rigDir).ListAgentBeads()
+	if err != nil {
+		t.Fatalf("ListAgentBeads: %v", err)
+	}
+	if _, ok := agents["tr-testrig-polecat-capable"]; !ok {
+		t.Fatalf("ListAgentBeads returned %d agent beads, want the town-database bead", len(agents))
+	}
+
+	logged, err := os.ReadFile(beadsDirLog)
+	if err != nil {
+		t.Fatalf("reading stub BEADS_DIR log: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(logged)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if line != townBeadsDir {
+			t.Errorf("ListAgentBeads queried BEADS_DIR=%q, want the town database %q", line, townBeadsDir)
+		}
+	}
+}

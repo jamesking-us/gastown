@@ -758,7 +758,19 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 // Queries both the issues table (authoritative metadata source) and the
 // wisps table (fallback existence source). Issues take precedence for duplicate
 // IDs so labels/type are preserved for doctor validation.
+//
+// Routes through agentBeadTarget() for the same reason GetAgentBead does: agent
+// beads live in the town/hq database, so a wrapper rooted at a rig would query a
+// database that holds none of them. Before gt-ega the getter routed and the
+// lister did not, so beads.New(rigPath).ListAgentBeads() returned an empty map
+// while GetAgentBead found every bead in it. Callers read that emptiness as
+// "no agent metadata recorded" and pinned every idle polecat at
+// cleanup_status=<missing> / NEEDS_RECOVERY forever.
 func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ListAgentBeads()
+	}
+
 	// Query issues table first. Issues include labels and type metadata used by
 	// doctor checks (for example, validating gt:agent labels).
 	// Agent beads are type=agent (infrastructure), hidden by bd list default filter.
@@ -802,7 +814,13 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
+//
+// Routes to the same database as ListAgentBeads and GetAgentBead (gt-ega).
 func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ListAgentBeadsFromWisps()
+	}
+
 	out, err := b.run("mol", "wisp", "list", "--json")
 	if err != nil {
 		return nil, nil // Wisps table may not exist yet
