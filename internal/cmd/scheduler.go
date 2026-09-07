@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -465,33 +468,104 @@ func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFie
 	}, true
 }
 
-// beadsSearchDirs returns directories to scan for scheduled beads:
-// the town root plus any rig directories that have a .beads/ subdirectory.
+// beadsSearchDirs returns the directories to scan for scheduled beads: the town
+// root plus every REGISTERED rig location that carries a .beads directory.
+//
+// Registration is authoritative, and deliberately so. This used to glob the town
+// root — every directory under it holding a .beads subdir was treated as a rig —
+// so any stray checkout, backup copy or leftover config dir left lying under the
+// town root was pulled into the town-wide dispatch path. That is not
+// hypothetical: /gt/beads (an unrouted, unregistered, server-mode config dir
+// whose database could not be opened) failed dispatch 165 times over 9 hours;
+// renaming it in place did not quarantine it because the scan simply followed
+// the new name; and /gt/forkrig reproduced the same town-wide outage days later.
+// A directory nobody registered must not be able to influence dispatch at all,
+// broken or not — merely scanning one probes its metadata and can create a
+// phantom database on the Dolt server.
+//
+// Both town registries are consulted, and their union is searched:
+//   - mayor/rigs.json (falling back to <townRoot>/rigs.json) names the rigs; for
+//     each, the rig dir and its mayor/rig dir are searched when they have .beads.
+//   - .beads/routes.jsonl names the dirs bd itself routes to, which is where
+//     sling contexts for a rig actually live.
+//
+// The union keeps coverage broad — a rig registered before its route is added,
+// or routed before it is registered, is still searched — while excluding
+// anything that appears in neither registry. Losing BOTH registries is an error
+// rather than an empty result: no search dirs would read as "nothing scheduled".
 func beadsSearchDirs(townRoot string) ([]string, error) {
 	dirs := []string{townRoot}
 	seen := map[string]bool{townRoot: true}
-	entries, err := os.ReadDir(townRoot)
-	if err != nil {
-		return nil, fmt.Errorf("discovering scheduler beads search dirs: %w", err)
+	add := func(dir string) {
+		if seen[dir] {
+			return
+		}
+		if _, err := os.Stat(filepath.Join(dir, constants.DirBeads)); err != nil {
+			return
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
 	}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "mayor" || e.Name() == "settings" {
+
+	rigNames, rigsErr := registeredRigNames(townRoot)
+	for _, name := range rigNames {
+		rigDir := filepath.Join(townRoot, name)
+		add(rigDir)
+		add(filepath.Join(rigDir, constants.DirMayor, constants.DirRig))
+	}
+
+	routes, routesErr := townRoutes(townRoot)
+	for _, route := range routes {
+		if route.Path == "" {
 			continue
 		}
-		rigDir := filepath.Join(townRoot, e.Name())
-		beadsDir := filepath.Join(rigDir, ".beads")
-		if _, err := os.Stat(beadsDir); err == nil && !seen[rigDir] {
-			dirs = append(dirs, rigDir)
-			seen[rigDir] = true
+		routeDir := route.Path
+		if !filepath.IsAbs(routeDir) {
+			routeDir = filepath.Join(townRoot, routeDir)
 		}
-		mayorRigDir := filepath.Join(rigDir, "mayor", "rig")
-		mayorBeadsDir := filepath.Join(mayorRigDir, ".beads")
-		if _, err := os.Stat(mayorBeadsDir); err == nil && !seen[mayorRigDir] {
-			dirs = append(dirs, mayorRigDir)
-			seen[mayorRigDir] = true
-		}
+		add(routeDir)
+	}
+
+	if rigsErr != nil && routesErr != nil {
+		return nil, fmt.Errorf("discovering scheduler beads search dirs: no readable town registry "+
+			"(rigs.json: %v; routes.jsonl: %v) — run 'gt doctor'", rigsErr, routesErr)
 	}
 	return dirs, nil
+}
+
+// registeredRigNames reads the rig names from the town's rig registry,
+// mayor/rigs.json, falling back to a town-root rigs.json the way the session
+// prefix registry does.
+func registeredRigNames(townRoot string) ([]string, error) {
+	var lastErr error
+	for _, path := range []string{
+		constants.MayorRigsPath(townRoot),
+		filepath.Join(townRoot, constants.FileRigsJSON),
+	} {
+		cfg, err := config.LoadRigsConfig(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		names := make([]string, 0, len(cfg.Rigs))
+		for name := range cfg.Rigs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return names, nil
+	}
+	return nil, lastErr
+}
+
+// townRoutes loads the town's beads routing table. Unlike beads.LoadRoutes, a
+// missing routes.jsonl is reported as an error: beadsSearchDirs needs to tell
+// "this town routes nothing" from "this town's routing table is gone".
+func townRoutes(townRoot string) ([]beads.Route, error) {
+	townBeadsDir := filepath.Join(townRoot, constants.DirBeads)
+	if _, err := os.Stat(filepath.Join(townBeadsDir, beads.RoutesFileName)); err != nil {
+		return nil, err
+	}
+	return beads.LoadRoutes(townBeadsDir)
 }
 
 // countActivePolecats counts all running polecat tmux sessions across all rigs.
