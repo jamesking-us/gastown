@@ -561,3 +561,127 @@ func TestDeaconPatrolCarriesServedWispProtections(t *testing.T) {
 		}
 	}
 }
+
+// bannedDeletionInvocation reports the first line of a formula's raw source that
+// invokes one of the OTHER commands the hq-gk8d wisp-GC ban covers, as opposed
+// to merely naming one inside a `>`-quoted PROHIBITED block or in the indented
+// `[REMOVED]` evidence lines that record what a disarmed step used to run.
+//
+// The ban is not a ban on one spelling. Three roads were disarmed one at a time
+// because each new one was named after its harmless half:
+//
+//   - "bd mol wisp gc"     — the original (see bannedWispGCInvocation)
+//   - "gt compact"         — deletes closed wisps past TTL: closed + age is the
+//     banned shape reached by another road. Ruled in scope by the mayor.
+//     "gt compact" also executes on any positional argument, so
+//     "gt compact status" — the natural read-only guess — runs a
+//     compaction (hq-b8eo). The only form left runnable is
+//     "gt compact report --weekly", which branches to the weekly
+//     rollup before any compaction runs (verified 2026-09-02).
+//   - "gt patrol digest"   — aggregate-then-delete: patrol.go:166 calls
+//     deletePatrolDigests, which batch-deletes every digest it
+//     matched. Ruled in scope by the mayor on hq-zlng. The
+//     2026-09-02 lift of its --dry-run form was explicitly scoped
+//     to that binary and re-arms on any rebuild, so no form of it
+//     is runnable from a formula.
+//
+// Regression guard for gt-cdi: the deacon patrol's "wisp-compact" and
+// "patrol-digest" steps were disarmed in the hand-patched copy under
+// .beads/formulas but NOT in the source here, which is the exact drift that
+// "gt doctor --fix" repairs in the wrong direction (gt-9ab, gt-34h).
+func bannedDeletionInvocation(content []byte) (string, bool) {
+	unescaped := strings.ReplaceAll(string(content), `\n`, "\n")
+	for _, line := range strings.Split(unescaped, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "gt compact report --weekly") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "gt compact") || strings.HasPrefix(trimmed, "gt patrol digest") {
+			return trimmed, true
+		}
+	}
+	return "", false
+}
+
+// TestFormulasDoNotInvokeBannedDeletions verifies that no embedded formula
+// invokes the compaction or patrol-digest roads to wisp deletion while the
+// hq-gk8d ban stands. See bannedDeletionInvocation for why one spelling is not
+// enough. Companion to TestFormulasDoNotInvokeBannedWispGC.
+func TestFormulasDoNotInvokeBannedDeletions(t *testing.T) {
+	entries, err := formulasFS.ReadDir("formulas")
+	if err != nil {
+		t.Fatalf("reading embedded formulas dir: %v", err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		t.Run(name, func(t *testing.T) {
+			content, err := formulasFS.ReadFile("formulas/" + name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+
+			if line, found := bannedDeletionInvocation(content); found {
+				t.Errorf("%s invokes a banned wisp-deletion path: %q\n"+
+					"Compaction and patrol-digest are both IN SCOPE of the hq-gk8d ban\n"+
+					"(mayor rulings 2026-09-01 and hq-zlng): each deletes ephemeral records\n"+
+					"as a side effect of a step named after its harmless half.\n"+
+					"Run nothing; record the SKIP. See gt-cdi, gt-h7z, hq-zlng, hq-qi3a.",
+					name, line)
+			}
+		})
+	}
+}
+
+// TestDeaconPatrolDeletionStepsCarryProhibition verifies that the deacon patrol
+// steps that USED to invoke a deletion path explain why they no longer do, in
+// the step text the hook actually serves.
+//
+// This is the hq-qi3a requirement: the formula FILES are not the surface that
+// executes. The hook serves each step as a wisp bead description, so a fresh
+// session with clean context reads only that text. A step that is merely empty
+// teaches nothing and invites the next editor to restore "cleanup"; a step that
+// carries the standing order cannot be silently re-armed.
+func TestDeaconPatrolDeletionStepsCarryProhibition(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing deacon patrol formula: %v", err)
+	}
+
+	descByID := make(map[string]string, len(f.Steps))
+	for _, step := range f.Steps {
+		descByID[step.ID] = step.Description
+	}
+
+	// stepID -> the bead that rules its deletion path in scope of the ban.
+	steps := map[string]string{
+		"inbox-check":    "hq-hazr",
+		"wisp-compact":   "hq-gk8d",
+		"compact-report": "hq-gk8d",
+		"patrol-digest":  "hq-zlng",
+	}
+
+	for id, ruling := range steps {
+		t.Run(id, func(t *testing.T) {
+			desc, ok := descByID[id]
+			if !ok || desc == "" {
+				t.Fatalf("%s step not found or has empty description", id)
+			}
+			if !strings.Contains(desc, "PROHIBITED") && !strings.Contains(desc, "BANNED") {
+				t.Errorf("%s step is missing its prohibition block\n"+
+					"The served step text must carry the standing order, not just omit\n"+
+					"the command: the hook serves this text to sessions that have never\n"+
+					"seen the ban. See gt-cdi, hq-qi3a.", id)
+			}
+			if !strings.Contains(desc, ruling) {
+				t.Errorf("%s step's prohibition does not cite %s, the ruling that puts\n"+
+					"this deletion path in scope of the ban. A prohibition a reader\n"+
+					"cannot trace is one they will talk themselves out of.", id, ruling)
+			}
+		})
+	}
+}

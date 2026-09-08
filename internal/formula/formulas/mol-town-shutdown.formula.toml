@@ -129,7 +129,11 @@ Rotate logs to prevent unbounded growth.
 gt daemon rotate-logs
 
 # Clean up old session captures (but not current sandboxes)
-gt doctor --fix
+# REMOVED — `gt doctor --fix` is a wisp-GC path (its wisp-gc check shells out to the
+# banned `bd mol wisp gc`; see internal/doctor/wisp_check.go) and is PROHIBITED
+# town-wide while hq-gk8d stands. Run the read-only `gt doctor` instead and leave the
+# capture cleanup to its own targeted command. Ref hq-hazr, hq-qi3a, gt-cdi.
+gt doctor
 ```
 
 Old logs are moved to `$GT_ROOT/logs/archive/` with timestamps.

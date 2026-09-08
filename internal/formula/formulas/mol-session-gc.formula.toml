@@ -29,8 +29,9 @@ GC is destructive. This formula errs on the side of caution:
 - Conservative mode: Only obviously dead things
 - Aggressive mode: Includes old but possibly-recoverable state
 
-Running `gt doctor --fix` handles most of this. This formula wraps it with
-reporting and multi-rig scope."""
+This formula used to wrap `gt doctor --fix` with reporting and multi-rig scope. That
+command is PROHIBITED while the hq-gk8d wisp-GC ban stands — it is a wisp-GC path (see the
+`execute-gc` step) — so the wrapper now reports and cleans only the non-wisp classes."""
 formula = "mol-session-gc"
 version = 1
 
