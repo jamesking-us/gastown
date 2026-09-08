@@ -1028,9 +1028,17 @@ bd list --status=open --json 2>/dev/null | jq length
 gt sling mol-session-gc deacon/dogs --var mode=conservative
 ```
 
-**Important:** Do NOT run `gt doctor -v` or `gt doctor --fix` inline.
-`gt doctor -v` takes 60+ seconds and blocks the patrol loop.
-Dogs handle cleanup. The Deacon stays lightweight - detection only.
+**Important:** Do NOT run `gt doctor -v` or `gt doctor --fix` inline — and while the
+hq-gk8d ban stands, do not run `gt doctor --fix` **at all, from any seat**. Two separate
+reasons, and the second is the serious one:
+1. `gt doctor -v` takes 60+ seconds and blocks the patrol loop. Dogs handle cleanup; the
+   Deacon stays lightweight - detection only.
+2. **`gt doctor --fix` IS a wisp-GC path.** Its `wisp-gc` check runs the banned
+   `bd mol wisp gc` in every rig it found abandoned wisps in
+   (`internal/doctor/wisp_check.go`, `Fix`). The check's own FixHint invites you to run it.
+   The source fix that disarms this is gt-cdi; **it only takes effect once a rebuilt `gt`
+   is installed**, so until you can date the installed binary to a build carrying that fix,
+   treat `gt doctor --fix` as the banned command wearing a repair verb.
 
 **Step 3: If nothing to clean**
 Skip dispatch - system is healthy.
@@ -1038,7 +1046,8 @@ Skip dispatch - system is healthy.
 **Cleanup types (for reference):**
 - orphan-sessions: Dead tmux sessions
 - orphan-processes: Orphaned Claude processes
-- wisp-gc: Old wisps past retention
+- (wisp GC is NOT a cleanup type available to this step or to the dog it dispatches —
+  no wisp GC of any variant, any seat, any path, until hq-hazr's fix of record ships)
 
 **Exit criteria:** Session GC dispatched to dog (if needed)."""
 
@@ -1046,44 +1055,56 @@ Skip dispatch - system is healthy.
 id = "wisp-compact"
 title = "Compact expired wisps"
 needs = ["session-gc"]
-description = """
+description = '''
 Run TTL-based wisp compaction to manage storage growth.
 
-**Step 1: Preview compaction scope**
-```bash
-gt compact --dry-run --json
-```
+> ## ⛔⛔ STEP 20 IS PROHIBITED IN ITS ENTIRETY — RUN NOTHING HERE ⛔⛔
+> **Disarmed 2026-09-02T01:3xZ (deacon), carried into the formula SOURCE 2026-09-08 (gt-cdi).**
+> This step had never been patched in the source: every earlier remediation targeted the
+> `inbox-check` step (`bd mol wisp gc --closed --force`) and the `compact-report` step
+> (`gt compact report`). **THIS step — the one actually titled "Compact expired wisps" —
+> printed a bare `gt compact --verbose` the whole time**, in every pour, in every lineage,
+> served to every cycle. It did not fire only because cycles were recording
+> `wisp-compact:SKIP` for other reasons. That is luck, not a control.
+>
+> **`gt compact` deletes closed wisps past TTL, and the mayor ruled compaction IN SCOPE of
+> the hq-gk8d ban** — closed + age IS the banned shape, reached by another road. Additionally
+> `gt compact` **silently executes on any positional argument**: `gt compact status`, the
+> natural read-only guess, RUNS A COMPACTION (**hq-b8eo**). There is no safe read here, and
+> `--dry-run --json` is not one either — it returns `promoted:null deleted:null` against
+> wisps that are past TTL, and **null is not a measured zero**.
+>
+> **⚠ THE OLD PARENTHETICAL WAS FALSE, WHICH IS WHY THIS BLOCK IS LONG.** The removed text
+> claimed deletions were safe because "Dolt AS OF preserves history". **THEY ARE NOT
+> PRESERVED.** `wisps` and `wisp_%` are in `dolt_ignore`, so no wisp table is ever committed:
+> `select count(*) from wisps AS OF 'HEAD'` returns "table not found: wisps" while the same
+> query on `issues` returns a real count (hq-6ewp; first recorded as Harm 4 on hq-hazr
+> 2026-09-01, re-verified 2026-09-02T01:2xZ). **A wisp delete is unrecoverable and invisible
+> to Dolt.** The only record that outlives a deleted wisp is the line written to
+> `<town>/.events.jsonl` before the delete — read that, never the wisps table, when asking
+> later what a cycle removed.
+>
+> **WHAT TO DO:** run nothing. Record `wisp-compact:SKIP` with a read-only census
+> (`bd mol wisp list --all` — and ignore the wisp-GC hint it prints; the DEFAULT
+> `bd mol wisp list` is blind to closed wisps and returns a fabricated zero), and post the
+> skip to hq-hazr. In force until hq-hazr's fix of record ships. See also gt-h7z, hq-la3m,
+> hq-qi3a.
 
-Parse the JSON output:
-- If promoted + deleted == 0, skip (nothing to compact)
-- If errors present, log and continue
+The original step's commands are RETAINED ONLY AS EVIDENCE — do not execute them:
 
-**Step 2: Execute compaction (if needed)**
-```bash
-gt compact --verbose
-```
+    [REMOVED] preview:  gt compact --dry-run --json
+    [REMOVED] execute:  gt compact --verbose
 
-This runs the compaction algorithm:
-- Closed wisps past TTL → deleted. PERMANENTLY. This line used to say "Dolt AS
-  OF preserves history" and that was false, measured (hq-6ewp): the wisps table
-  family is in dolt_ignore, so no wisp table is ever committed and AS OF answers
-  table-not-found on the one table compaction deletes from. There is no undo
-  behind this step. Each deletion is recorded to <town>/.events.jsonl first, and
-  a deletion that cannot be recorded is skipped — that record is the only thing
-  that outlives the wisp, so read it, not the wisps table, when asking later
-  what a cycle removed.
+The compaction algorithm they described:
+- Closed wisps past TTL → deleted. PERMANENTLY, and unrecoverably — see above.
 - Non-closed wisps past TTL → promoted (stuck detection)
 - Wisps with comments/references/keep labels → promoted (proven value)
 
 **Step 3: Log results**
-Note promoted/deleted/skipped counts for the patrol digest.
+Record `wisp-compact:SKIP` and the closed-wisp census count for the patrol digest.
 
-**Performance:**
-Compaction runs every patrol cycle. The query is fast (single bd list + filter).
-If performance becomes an issue, add a cooldown gate (e.g., run once per hour).
-
-**Exit criteria:** Wisps compacted (or nothing to compact)."""
-
+**Exit criteria:** Skip recorded with its census (nothing is compacted while the ban stands).
+'''
 [[steps]]
 id = "compact-report"
 title = "Send compaction digest report"
@@ -1190,39 +1211,62 @@ See: GH#24, gt-7awfj
 id = "patrol-digest"
 title = "Aggregate daily patrol digests"
 needs = ["costs-digest"]
-description = """
+description = '''
 **DAILY DIGEST** - Aggregate yesterday's patrol cycle digests.
 
-Patrol cycles (Deacon, Witness, Refinery) create ephemeral per-cycle digests
-to avoid JSONL pollution. This step aggregates them into a single permanent
-"Patrol Report YYYY-MM-DD" bead for audit purposes.
+> ## ⛔⛔ STEP 23 IS PROHIBITED — MAYOR RULING hq-zlng, 2026-09-02T04:49Z ⛔⛔
+> **RULING, verbatim in substance:** `gt patrol digest` is **IN SCOPE** of the hq-gk8d ban.
+> A command whose own help text says it deletes its sources is the aggregate-then-delete
+> shape regardless of the verb it wears, and after `gt compact report` the presumption for
+> ANY "reporting" command that touches ephemeral records is **guilty until source-verified**.
+>
+> **THE TRAP IS THE ONE STEP 21 ALREADY WORE.** This step is titled "aggregate digests";
+> the deleting appears only as a bullet ("Deletes the source digests"). The `inbox-check`
+> step was disarmed, then `compact-report`, then `wisp-compact` — this is the **FOURTH road
+> to the same destination**, and it was found by reading a step title with suspicion, not by
+> anything failing.
+>
+> **SOURCE-VERIFIED 2026-09-02T05:4xZ (deacon). THE TWO FORMS DO NOT HAVE THE SAME ANSWER:**
+> • **The mutating form is CONFIRMED DESTRUCTIVE.** `internal/cmd/patrol.go:166` calls
+>   `deletePatrolDigests()`, which builds `bd delete --force <ids...>` across every digest
+>   `queryPatrolDigests()` matched. A real batch delete, on the tool's normal path.
+> • **The `--dry-run` form was, on that build, genuinely read-only** — `patrol.go:145`
+>   returned before the create and the delete, with no subprocess and so no unpropagated-flag
+>   hole. **That is the precise respect in which it DIFFERED from `gt compact report
+>   --dry-run` (gt-h7z)**, where the flag gated only whether the digest printed while a child
+>   `gt compact --json` ran the real delete. Do not carry either finding over to the other
+>   tool: they are different programs and were measured separately.
+>
+> **THE 2026-09-02 DRY-RUN LIFT DOES NOT APPLY TO THIS BUILD.** The mayor's lift was
+> explicitly **for that binary only, re-arming on ANY `gt` upgrade or rebuild**, because
+> **a flag's safety is a property of a BUILD, not of the flag** (gt-h7z is the proof: the
+> identical `--dry-run` spelling was an early return in one program and a live delete path
+> in another). This formula source has been rebuilt since, so **both forms are banned here
+> again** until someone re-verifies `patrol.go:145-158` against the installed build and the
+> mayor re-lifts by comment. **A lift you cannot date to a build is not a lift**, and a seat
+> that verifies a tool and then authorizes itself has reproduced the entire failure mode this
+> town is patching.
+>
+> **WHAT TO DO INSTEAD — SKIP, and record the skip.** Nothing is lost: the digest content
+> already reaches **hq-hazr** through the per-cycle step audit this patrol posts there as a
+> comment. Accumulation of undeleted source digests is bounded and cheap; an unrecorded
+> deletion is neither. Record `patrol-digest:SKIP` citing **hq-zlng**.
 
-**Step 1: Check if digest is needed**
-```bash
-# Preview yesterday's patrol digests (dry run)
-gt patrol digest --yesterday --dry-run
-```
+The step's original commands are RETAINED ONLY AS EVIDENCE — do not execute them:
 
-If output shows "No patrol digests found", skip to Step 3.
+    [REMOVED] preview:  gt patrol digest --yesterday --dry-run
+    [REMOVED] execute:  gt patrol digest --yesterday
 
-**Step 2: Create the digest**
-```bash
-gt patrol digest --yesterday
-```
-
-This:
+What the mutating form does, recorded so nobody has to run it to find out:
 - Queries all ephemeral patrol digests from yesterday
 - Creates a single "Patrol Report YYYY-MM-DD" bead with aggregated data
-- Deletes the source digests
+- **Deletes the source digests** — this is the banned half, and it is not optional
 
-**Step 3: Verify**
-Daily patrol digests preserve audit trail without per-cycle pollution.
+**Timing**: while the ban stands there is no per-morning action here; record the skip on
+every cycle rather than omitting the step silently.
 
-**Timing**: Run once per morning patrol cycle. The --yesterday flag ensures
-we don't try to digest today's incomplete data.
-
-**Exit criteria:** Yesterday's patrol digests aggregated (or none to aggregate)."""
-
+**Exit criteria:** `patrol-digest:SKIP` recorded citing hq-zlng.
+'''
 [[steps]]
 id = "log-maintenance"
 title = "Rotate logs and prune state"

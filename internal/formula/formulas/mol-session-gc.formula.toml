@@ -118,9 +118,30 @@ Actually remove the garbage.
 
 **1. Run doctor with fix:**
 ```bash
-gt doctor --fix
-# This handles sessions, processes, and wisps
+# REMOVED — see the PROHIBITED block below. Run nothing here.
 ```
+
+> 🚨 **PROHIBITED WHILE hq-gk8d STANDS — `gt doctor --fix` IS A WISP-GC PATH.**
+> Town-wide standing order, mayor-ratified 2026-09-01 (hq-hazr): no wisp GC of any variant,
+> from any seat, by any path. `gt doctor --fix` is one of those paths and does not look like
+> one — its `wisp-gc` check shells out to the banned `bd mol wisp gc` in every rig where it
+> counted abandoned wisps (`internal/doctor/wisp_check.go`, `Fix`), and its own fix hint
+> invites you to run it. This formula is slung to a **dog** by the deacon's `session-gc`
+> step, so the deacon's own "do not run doctor --fix inline" warning does NOT cover it:
+> the dog is a second seat reaching the same command.
+>
+> **What to do instead:** run the READ-ONLY report and clean only the non-wisp classes by
+> their own commands:
+> ```bash
+> gt doctor            # read-only; reports, fixes nothing
+> ```
+> Session and process orphans have their own targeted cleanups; wisp cleanup is not
+> available to this formula at all while the ban stands. Record the skip in the report.
+>
+> The source fix that disarms the check is **gt-cdi**; it takes effect only once a rebuilt
+> `gt` is installed. Until you can date the installed binary to a build carrying it, treat
+> `gt doctor --fix` as the banned command wearing a repair verb. See hq-gk8d, hq-hazr,
+> hq-qi3a.
 
 **2. For aggressive mode, additional cleanup:**
 ```bash
