@@ -124,7 +124,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt namepool reset` | Releases all claimed polecat names |
 | `gt checkpoint clear` | Removes checkpoint file |
 | `gt issue clear` | Clears issue from tmux status line |
-| `gt doctor --fix` | Auto-fixes: orphan sessions, wisp GC, stale redirects, worktree validity |
+| `gt doctor --fix` | Auto-fixes: orphan sessions, stale redirects, worktree validity. It does **not** garbage collect wisps: the `wisp-gc` check is report-only, because wisp GC is prohibited town-wide until hq-hazr ships its fix of record (hq-gk8d). See gt-cdi. |
 
 ## System-Level Cleanup
 

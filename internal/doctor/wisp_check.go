@@ -2,15 +2,31 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"time"
 )
 
-// WispGCCheck detects and cleans orphaned wisps that are older than a threshold.
-// Wisps are ephemeral issues (Wisp: true flag) used for patrol cycles and
-// operational workflows that shouldn't accumulate.
+// WispGCCheck REPORTS orphaned wisps that are older than a threshold. Wisps are
+// ephemeral issues (Wisp: true flag) used for patrol cycles and operational
+// workflows that shouldn't accumulate.
+//
+// This check is REPORT-ONLY and deliberately not fixable. Its Fix used to shell
+// out to the wisp GC command, which is prohibited town-wide by mayor-ratified
+// standing order (hq-hazr, 2026-09-01; hq-gk8d), in force until hq-hazr ships
+// its fix of record. That made `gt doctor --fix` a wisp-GC path wearing a repair
+// verb: an operator or a dog running a routine repair reached the unscoped GC
+// without ever naming it. The GC is unscoped and deletes closed wisps across the
+// WHOLE database — the active patrol molecule's own step ledger, completed dog
+// molecules the hq-z70b guard depends on, and rig merge-request beads, which
+// permanently orphans cleanup wisps. Wisp deletes are also unrecoverable: the
+// wisps tables are in dolt_ignore, so Dolt AS OF cannot bring one back.
+//
+// Do not re-arm Fix here when the ban lifts without also re-reading hq-hazr's
+// fix of record: what lifts is the ban, not the unscoped blast radius.
+// See gt-cdi, gt-9ab, gt-34h, hq-qi3a.
 type WispGCCheck struct {
 	FixableCheck
 	threshold     time.Duration
@@ -23,7 +39,7 @@ func NewWispGCCheck() *WispGCCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "wisp-gc",
-				CheckDescription: "Detect and clean orphaned wisps (>1h old)",
+				CheckDescription: "Detect orphaned wisps (>1h old) — report-only",
 				CheckCategory:    CategoryCleanup,
 			},
 		},
@@ -73,7 +89,7 @@ func (c *WispGCCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d abandoned wisp(s) found (>1h old)", totalAbandoned),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to garbage collect orphaned wisps",
+			FixHint: "Report only — wisp GC is prohibited town-wide until hq-hazr's fix of record ships (hq-gk8d). Do not run any wisp GC variant to clear these.",
 		}
 	}
 
@@ -126,20 +142,19 @@ func (c *WispGCCheck) countAbandonedWisps(rigPath string) int {
 	return count
 }
 
-// Fix runs bd mol wisp gc in each rig with abandoned wisps.
-func (c *WispGCCheck) Fix(ctx *CheckContext) error {
-	var lastErr error
+// CanFix returns false: this check is report-only. The repair it used to perform
+// is the prohibited wisp GC (see the type comment). Returning false keeps the
+// check out of the --fix path entirely rather than relying on Fix's guard.
+func (c *WispGCCheck) CanFix() bool {
+	return false
+}
 
-	for rigName := range c.abandonedRigs {
-		rigPath := filepath.Join(ctx.TownRoot, rigName)
-
-		// Run bd mol wisp gc
-		cmd := exec.Command("bd", "mol", "wisp", "gc")
-		cmd.Dir = rigPath
-		if output, err := cmd.CombinedOutput(); err != nil {
-			lastErr = fmt.Errorf("%s: %v (%s)", rigName, err, string(output))
-		}
-	}
-
-	return lastErr
+// Fix performs no repair. It is retained only so that a direct caller that
+// bypasses CanFix gets a loud, explicit refusal instead of silently running the
+// banned GC. Do not reintroduce the exec here; see the type comment.
+func (c *WispGCCheck) Fix(_ *CheckContext) error {
+	return errors.New("wisp-gc: refusing to garbage collect wisps — " +
+		"wisp GC of every variant is prohibited town-wide until hq-hazr ships " +
+		"its fix of record (mayor-ratified 2026-09-01, hq-gk8d). This check is " +
+		"report-only; clear abandoned wisps outside the ban, not through gt doctor --fix")
 }

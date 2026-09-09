@@ -54,7 +54,9 @@ Cleanup checks (fixable):
   - stalled-polecats         Detect polecats with dead sessions and unpushed work (fixable)
   - orphan-processes         Detect orphaned Claude processes
   - session-name-format      Detect sessions with outdated naming format (fixable)
-  - wisp-gc                  Detect and clean abandoned wisps (>1h)
+  - wisp-gc                  Detect abandoned wisps (>1h) — REPORT ONLY, not fixable:
+                             wisp GC is prohibited town-wide until hq-hazr's fix of
+                             record ships (hq-gk8d). --fix will not clear these.
   - misclassified-wisps      Detect issues that should be wisps (purges to wisps table, fixable)
   - jsonl-bloat              Detect stale/bloated issues.jsonl vs live database
   - stale-beads-redirect     Detect stale files in .beads directories with redirects
