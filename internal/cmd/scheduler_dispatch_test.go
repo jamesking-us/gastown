@@ -43,6 +43,9 @@ func setupSchedulerScanFailureTown(t *testing.T) string {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	// The failing dir must be a REGISTERED rig: the scheduler only scans rigs
+	// the town registry names, so an unregistered one would never be reached.
+	writeSearchDirsRigsJSON(t, townRoot, "rig")
 	installFakeBD(t, `#!/bin/sh
 case "$BEADS_DIR" in
   */rig/.beads) echo "scan failed" >&2; exit 7 ;;
