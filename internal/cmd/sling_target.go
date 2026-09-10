@@ -272,6 +272,17 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 					return nil, err
 				}
 			}
+			if opts.DryRun {
+				// Dry-run must not spawn (gt-6vt). The rig-target branch above
+				// already returns here; this fallback path was missing the same
+				// guard, so previewing a sling to a dead/missing polecat really
+				// created one (worktree + agent bead) while everything
+				// downstream stayed conditional.
+				fmt.Printf("Would spawn fresh polecat in rig '%s' (target polecat has no active session)\n", rigName)
+				result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
+				result.Pane = "<new-pane>"
+				return result, nil
+			}
 			fmt.Printf("Target polecat has no active session, spawning fresh polecat in rig '%s'...\n", rigName)
 			spawnOpts := SlingSpawnOptions{
 				TownRoot:      opts.TownRoot,

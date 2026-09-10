@@ -1512,6 +1512,67 @@ func TestResolveTargetCreateSpawnsPolecatShorthandWhenPaneMissing(t *testing.T) 
 	}
 }
 
+// gt-6vt: --dry-run must not spawn a polecat when the named target polecat has
+// no active session. The rig-target branch already returned early; this dead
+// polecat fallback path really created a worktree + agent bead while printing
+// the rest of the plan in the conditional voice.
+func TestResolveTargetDryRunDoesNotSpawnForDeadPolecat(t *testing.T) {
+	for _, target := range []string{"gastown/polecats/toast", "gastown/toast"} {
+		t.Run(target, func(t *testing.T) {
+			townRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+				t.Fatalf("mkdir mayor/rig: %v", err)
+			}
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("getwd: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(cwd) })
+			if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+
+			prevResolve := resolveTargetAgentFn
+			prevSpawn := spawnPolecatForSling
+			t.Cleanup(func() {
+				resolveTargetAgentFn = prevResolve
+				spawnPolecatForSling = prevSpawn
+			})
+			resolveTargetAgentFn = func(target string) (string, string, string, error) {
+				return "", "", "", errors.New("getting pane for gt-toast: exit status 1")
+			}
+			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				t.Fatal("--dry-run must not spawn a polecat")
+				return nil, errors.New("unreachable")
+			}
+
+			var got *ResolvedTarget
+			out := captureStdout(t, func() {
+				got, err = resolveTarget(target, ResolveTargetOptions{DryRun: true, Create: true, NoBoot: true})
+			})
+			if err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if got.NewPolecatInfo != nil {
+				t.Fatal("dry run reported a spawned polecat")
+			}
+			if got.Agent != "gastown/polecats/<new>" {
+				t.Fatalf("Agent = %q, want gastown/polecats/<new>", got.Agent)
+			}
+			if got.Pane != "<new-pane>" {
+				t.Fatalf("Pane = %q, want <new-pane>", got.Pane)
+			}
+			if !strings.Contains(out, "Would spawn fresh polecat in rig 'gastown'") {
+				t.Fatalf("output missing conditional spawn line: %q", out)
+			}
+			if strings.Contains(out, "spawning fresh polecat") {
+				t.Fatalf("output claims a spawn happened: %q", out)
+			}
+		})
+	}
+}
+
 func TestResolveTargetCreateDoesNotSpawnCrewShorthandWhenPaneMissing(t *testing.T) {
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
