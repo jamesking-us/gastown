@@ -235,6 +235,35 @@ Question: ..."
 
 ---
 
+## Heavy Builds: Serialization Is Structural
+
+Your session environment sets `GOFLAGS=-p=4`. Go defaults `-p` to GOMAXPROCS, so
+a single unscoped `go test ./...` fans out to dozens of concurrent compile and
+link actions — that is how one command drove this host to load 326 and starved
+the town's Dolt server. Leave the cap alone: a `-p` on the command line
+overrides GOFLAGS, so do not pass a larger one.
+
+- **Scope your Go verbs to the packages you changed.** `go test ./internal/foo/`,
+  never `go test ./...`.
+- **Run `dotnet` bare.** The `dotnet` on PATH is already a serializing wrapper
+  that takes the town build lock; wrapping it in your own `flock` self-deadlocks.
+- **For a long, deliberate build you will outlive**, take the town lock —
+  **options BEFORE the lock path**:
+
+  ```bash
+  flock -w 1800 /tmp/.dotnet-build.lock -c 'go build ./internal/foo/' > /tmp/gate.log 2>&1
+  echo "rc=$?" >> /tmp/gate.log
+  ```
+
+  flock stops parsing options at the first non-option argument, so the
+  lock-path-first form exits rc=69 and **the wrapped command never runs** — a
+  silent no-op indistinguishable from contention. Prefer the `-p` cap for
+  ordinary gates: the lock can park you behind another rig's 30-minute build,
+  and a gate that dies queued with your session ships unbuilt code.
+- **Never pipe a command whose result gates a merge.** `... | tail` reports
+  tail's exit status, not the build's. Redirect to a file, capture rc into the
+  file, and read the file afterwards. An empty log is not a pass.
+
 ## Completion Protocol (MANDATORY)
 
 When your work is done, follow this checklist — **step 4 is REQUIRED**:
@@ -244,7 +273,8 @@ When your work is done, follow this checklist — **step 4 is REQUIRED**:
 ```
 [ ] 1. Run quality gates (ALL must pass):
        - npm projects: npm run lint && npm run format && npm test
-       - Go projects:  go test ./... && go vet ./...
+       - Go projects:  go test ./internal/<changed-pkg>/ && go vet ./internal/<changed-pkg>/
+                       (scope to what you changed — see Heavy Builds below)
 [ ] 2. Stage changes:     git add <files>
 [ ] 3. Commit changes:    git commit -m "msg (issue-id)"
 [ ] 4. Self-clean:        gt done   ← MANDATORY FINAL STEP
