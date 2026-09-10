@@ -1838,10 +1838,17 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		return
 	}
 
-	// Event gate: don't spawn a new Claude session when there's nothing to process.
+	// Spawn gate: don't spawn a new Claude session when there's nothing to process.
 	// If a refinery session is already running, Start() returns ErrAlreadyRunning (cheap).
 	// But spawning a NEW session with an empty queue burns API credits for nothing.
 	// The refinery formula uses await-event internally, so it will wake when events appear.
+	//
+	// Two independent signals mean there IS work. A pending event is the edge
+	// signal and it is lossy — gt mq submit can create the MR bead without
+	// emitting one. Queue depth is the level signal and it is durable. Gating
+	// on the event alone stalled a ready P1 MR for 3+ hours (gt-tyu), so when
+	// no event is pending the merge queue itself is consulted before skipping.
+	// See refineryQueueGate for the fork-rig guard applied on that path.
 	if !d.hasPendingEvents("refinery") {
 		// Check if session already exists before skipping — let running sessions continue
 		r := &rig.Rig{
@@ -1850,8 +1857,13 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		}
 		mgr := refinery.NewManager(r)
 		if running, _ := mgr.IsRunning(); !running {
-			d.logger.Printf("No pending refinery events and no session running for %s, skipping spawn", rigName)
-			return
+			forkGuardErr, depth, queueErr := refineryQueueDepth(mgr)
+			spawn, reason := refineryQueueGate(forkGuardErr, queueErr, depth)
+			if !spawn {
+				d.logger.Printf("No pending refinery events and no session running for %s (%s), skipping spawn", rigName, reason)
+				return
+			}
+			d.logger.Printf("No pending refinery events for %s but %s, spawning refinery", rigName, reason)
 		}
 	}
 
