@@ -35,13 +35,19 @@ func TestPatrolCycleEndStepIsNeutered(t *testing.T) {
 				"handoff is what turns the loop once the report is banned", role)
 		}
 
-		// Every mention of the command must sit on a line that also carries the
-		// marker. Mentions are fine; a bare instruction line is not.
+		// Every mention of the command must either sit inside the countermand
+		// blockquote ("> "-prefixed — the block whose header declares the
+		// command countermanded) or carry the DO-NOT-RUN marker on its own
+		// line. Mentions inside the block are fine; a bare instruction line
+		// is not. The backtick check below applies to every line, block
+		// included — backticks execute on transcription regardless of where
+		// the line came from (hq-baoe).
 		for _, line := range strings.Split(step, "\n") {
 			if !strings.Contains(line, needle) {
 				continue
 			}
-			if !strings.Contains(line, "COUNTERMANDED") {
+			inCountermandBlock := strings.HasPrefix(strings.TrimLeft(line, " \t"), ">")
+			if !inCountermandBlock && !strings.Contains(line, "COUNTERMANDED") {
 				t.Errorf("%s cycle-end step serves an un-neutered "+
 					"patrol-report line: %q", role, line)
 			}
