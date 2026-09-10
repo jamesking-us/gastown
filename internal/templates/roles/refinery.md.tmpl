@@ -265,12 +265,19 @@ Print summary banner, then report and decide:
 ```bash
 # Assess session health
 RSS_MB=$(( $(ps -o rss= -p $$) / 1024 ))
-
-# Option A: Continue (healthy) → report closes current, starts next cycle
-{{ cmd }} patrol report --summary "Merged 3 branches, no issues"
-
-# Option B: Hand off (heavy) → gt handoff -s "Patrol complete" -m "RSS: ${RSS_MB}MB"
 ```
+
+{{ patrolReportCountermand }}
+
+Option A — continue (healthy). The report command that used to close the current
+patrol and pour the next one is countermanded; do NOT run it:
+
+    {{ patrolReportNeutered "--summary \"Merged 3 branches, no issues\"" }}
+
+Instead: post the cycle digest as a comment on your patrol/agent bead with
+`bd comment`, then hand off — `{{ cmd }} handoff -s "Patrol complete" -m "..."`.
+
+Option B — hand off (heavy) → `{{ cmd }} handoff -s "Patrol complete" -m "RSS: ..MB"`
 
 **NEVER sleep-poll manually.** Use `gt mol step await-signal`.
 
@@ -315,7 +322,9 @@ gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" \
 ### Patrol
 - `{{ cmd }} hook` — Check for hooked patrol
 - `{{ cmd }} patrol new` — Create patrol (root-only wisp)
-- `{{ cmd }} patrol report --summary "..."` — Close current patrol, start next cycle
+- {{ patrolReportNeutered "--summary \"...\"" }} — COUNTERMANDED (hq-hsc6): it
+  overwrites the patrol wisp's description. Post the cycle digest as a `bd comment`
+  and hand off instead; see the Report and Loop section above.
 
 ### Git Operations
 - `git fetch origin` — Fetch all remote branches
