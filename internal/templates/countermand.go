@@ -77,9 +77,10 @@ const patrolReportCountermandBody = `> ## ⛔⛔ **{{cmd}} patrol report** IS CO
 >
 > **When you transcribe this command anywhere — mail, bead comment, commit
 > message, merge record — use single quotes or a single-quoted heredoc, and strip
-> the backticks.** Backticks and $(...) are command substitution inside a
+> the backticks.** Backticks and dollar-paren are command substitution inside a
 > double-quoted bash string and inside an unquoted heredoc, so documenting the ban
-> has itself run the command (hq-baoe). Never -m "..." with backticks.
+> has itself run the command (hq-baoe). Never pass a body with -m and backticks in
+> it, and never use an unquoted heredoc.
 >
 > Ref: hq-hsc6 (countermand of record), hq-gk8d (standing ruling), hq-6ewp,
 > hq-45p5, hq-f73g, gt-p2x (this prime-context surface).`

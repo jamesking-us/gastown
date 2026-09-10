@@ -17,7 +17,27 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/templates"
 )
+
+// patrolCycleEndStep returns the "at cycle end" work-loop step for a patrol
+// role. The cycle-report command is COUNTERMANDED by hq-hsc6 (it overwrites the
+// patrol wisp's description), so the countermand block is served inline at the
+// point of instruction and the command itself is printed only in neutered,
+// backtick-free form. gt-p2x: this work loop is what a fresh patrol session
+// reads first, and its startup protocol says execute immediately — an
+// un-neutered instruction here fires before the session can reach the
+// countermand in its wisp.
+func patrolCycleEndStep(handoffSubject string) string {
+	return "At cycle end:\n" +
+		"   - If context LOW:\n" +
+		templates.PatrolReportCountermand() + "\n" +
+		"     * " + templates.PatrolReportNeutered("--summary \"<brief summary of observations>\"") + "\n" +
+		"     * Post the cycle digest and step audit as a bd comment on your patrol/agent bead instead, then hand off\n" +
+		"   - If context HIGH:\n" +
+		"     * Send handoff: `" + cli.Name() + " handoff -s \"" + handoffSubject + "\" -m \"<observations>\"`\n" +
+		"     * Exit cleanly (daemon respawns fresh session)"
+}
 
 // MoleculeCurrentOutput represents the JSON output of bd mol current.
 type MoleculeCurrentOutput struct {
@@ -344,7 +364,7 @@ func outputDeaconPatrolContext(ctx RoleContext) {
 		HeaderTitle:   "Patrol Status (Wisp-based)",
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Deacon patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
+			patrolCycleEndStep("Deacon patrol"),
 		},
 	}
 	outputPatrolContext(cfg)
@@ -369,7 +389,7 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 		ExtraVars:     extraVars,
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Witness patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
+			patrolCycleEndStep("Witness patrol"),
 		},
 	}
 	outputPatrolContext(cfg)
@@ -400,7 +420,7 @@ func outputRefineryPatrolContext(ctx RoleContext) {
 		ExtraVars:     buildRefineryPatrolVars(ctx),
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Refinery patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
+			patrolCycleEndStep("Refinery patrol"),
 		},
 	}
 	outputPatrolContext(cfg)
