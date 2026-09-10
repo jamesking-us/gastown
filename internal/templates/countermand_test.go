@@ -19,10 +19,19 @@ func runnablePatrolReportLines(text string) []string {
 
 	var armed []string
 	for _, line := range strings.Split(text, "\n") {
-		if !strings.HasPrefix(stripCommandDecoration(line), needle) {
-			continue
+		// (a) A line-initial invocation: a command block or a bare command.
+		runnable := strings.HasPrefix(stripCommandDecoration(line), needle)
+
+		// (b) The command inside inline code, anywhere on the line. This is the
+		// form the witness template served ("- Report and loop: `gt patrol
+		// report ...`"), and backticks are the dangerous wrapper specifically:
+		// a reader who transcribes them into a double-quoted bash string or an
+		// unquoted heredoc executes the command (hq-baoe).
+		if strings.Contains(line, "`"+needle) {
+			runnable = true
 		}
-		if strings.Contains(line, "COUNTERMANDED") {
+
+		if !runnable || strings.Contains(line, "COUNTERMANDED") {
 			continue
 		}
 		armed = append(armed, line)
