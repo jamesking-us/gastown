@@ -216,6 +216,16 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// this empty value with intentional settings like --max-old-space-size.
 	env["NODE_OPTIONS"] = ""
 
+	// Cap Go's package-level build parallelism for every agent session.
+	// `go build`/`go test`/`go vet` default -p to GOMAXPROCS; on a 48-core
+	// host one unscoped command saturates the machine and starves Dolt
+	// (gt-38l, directive hq-rp93). Injected at spawn so the bound is
+	// structural rather than a rule each worker must remember. Any -p the
+	// operator already set in GOFLAGS is preserved.
+	if goflags := GoflagsWithParallelismCap(os.Getenv("GOFLAGS"), ResolveGoParallelism()); goflags != "" {
+		env["GOFLAGS"] = goflags
+	}
+
 	// Resolve effort level from per-role config (role_effort in town/rig settings,
 	// or cost-tier presets). Falls back to "high" when no config exists.
 	// The CLAUDE_CODE_EFFORT_LEVEL env var is deprecated — effort is now configured

@@ -468,7 +468,8 @@ succeeds. **YOU must push — NEVER say "ready to push when you are!"**
 **MANDATORY FORK WORKFLOW:**
 
 1. **File beads** for remaining follow-up work
-2. **Run quality gates** (if code changed): `go test ./...` / `golangci-lint run ./...`
+2. **Run quality gates** (if code changed): `go test ./<changed-pkg>/` / `golangci-lint run ./<changed-pkg>/`
+   (scope to what you changed; your session sets `GOFLAGS=-p=4` so builds cannot saturate the host)
 3. **Update beads** — close finished work only when appropriate
 4. **PUSH TO FORK REMOTE — NON-NEGOTIABLE:**
    ```bash
@@ -486,7 +487,8 @@ succeeds. **YOU must push — NEVER say "ready to push when you are!"**
 **MANDATORY WORKFLOW:**
 
 1. **File beads** for remaining follow-up work
-2. **Run quality gates** (if code changed): `go test ./...` / `golangci-lint run ./...`
+2. **Run quality gates** (if code changed): `go test ./<changed-pkg>/` / `golangci-lint run ./<changed-pkg>/`
+   (scope to what you changed; your session sets `GOFLAGS=-p=4` so builds cannot saturate the host)
 3. **Update beads** — close finished work
 4. **PUSH TO REMOTE — NON-NEGOTIABLE:**
    ```bash
