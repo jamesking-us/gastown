@@ -37,6 +37,13 @@ func CmdName() string {
 // templateFuncs provides custom functions for templates.
 var templateFuncs = template.FuncMap{
 	"cmd": CmdName, // {{ cmd }} returns the CLI command name
+
+	// {{ patrolReportCountermand }} / {{ patrolReportNeutered "<args>" }} serve
+	// the hq-hsc6 countermand of "<cmd> patrol report" inline at each point of
+	// instruction. See countermand.go — the no-backticks rule there is
+	// load-bearing.
+	"patrolReportCountermand": PatrolReportCountermand,
+	"patrolReportNeutered":    PatrolReportNeutered,
 }
 
 //go:embed roles/*.md.tmpl messages/*.md.tmpl
