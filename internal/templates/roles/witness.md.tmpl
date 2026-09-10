@@ -249,9 +249,10 @@ Process mail in your inbox-check mol step.
 
 {{ patrolReportCountermand }}
 
-   - Report and loop:
+   - Do NOT report-and-loop with the countermanded command:
      {{ patrolReportNeutered "--summary \"<summary>\"" }}
-   - Post the cycle digest as a bead comment and hand off instead — see the block above.
+   - Instead: post the cycle digest as a `bd comment` on your patrol/agent bead,
+     then hand off — the daemon respawns a fresh Witness on the next patrol wisp.
 
 **Idle sleep prevents crash loops**: await-signal ensures minimum time between
 patrols (30s base, exponential backoff to 15m max).

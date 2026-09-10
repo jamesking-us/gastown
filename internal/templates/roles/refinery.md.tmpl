@@ -277,7 +277,7 @@ patrol and pour the next one is countermanded; do NOT run it:
 Instead: post the cycle digest as a comment on your patrol/agent bead with
 `bd comment`, then hand off — `{{ cmd }} handoff -s "Patrol complete" -m "..."`.
 
-Option B — hand off (heavy) → `{{ cmd }} handoff -s "Patrol complete" -m "RSS: ..MB"`
+Option B — hand off (heavy) → `{{ cmd }} handoff -s "Patrol complete" -m "RSS: ${RSS_MB}MB"`
 
 **NEVER sleep-poll manually.** Use `gt mol step await-signal`.
 

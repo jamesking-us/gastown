@@ -9,11 +9,14 @@ import (
 // invocation of the countermanded patrol-report command without carrying the
 // DO-NOT-RUN marker.
 //
-// The test is line-initial invocation, NOT mere occurrence of the string: the
-// countermand block itself names the command several times inside prohibition
-// prose, and that is exactly the text we want to keep. This mirrors the audit
-// method of record on hq-gk8d ("regexp for a LINE-INITIAL command ... mere
-// occurrence of the string is not the test").
+// "Runnable" is line-initial invocation OR the command wrapped in inline code —
+// NOT mere occurrence of the string. The countermand block itself names the
+// command several times inside prohibition prose, and that is exactly the text
+// we want to keep. Rejecting mere occurrence follows the audit method of record
+// on hq-gk8d ("regexp for a LINE-INITIAL command ... mere occurrence of the
+// string is not the test"); the inline-code case is added because line-initial
+// alone misses the shape this repo actually served, which had prose in front of
+// the command (see TestRunnablePatrolReportLinesDetection).
 func runnablePatrolReportLines(text string) []string {
 	needle := CmdName() + " patrol report"
 

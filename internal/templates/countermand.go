@@ -10,18 +10,21 @@ import "strings"
 // countermand has to appear at EVERY point of instruction (the mayor's
 // inline-countermand precedent, hq-gk8d served-wisp clause), and the served
 // surfaces are split between Go string literals (the patrol work loop printed
-// by `gt prime`) and the embedded role templates. Three hand-copies drift; one
+// by gt prime) and the embedded role templates. Three hand-copies drift; one
 // constant does not.
 //
 // Formatting rules for this text, which are load-bearing, not cosmetic:
 //
-//   - The command is written in **bold**, NEVER in backticks. Backticks and
-//     $(...) interpolate inside a double-quoted bash string and inside an
-//     unquoted heredoc, so an agent transcribing a backticked prohibition into
-//     `-m "..."` executes the very command being banned. That has happened
-//     (hq-baoe: cl-refinery advanced its own patrol hook and caused
+//   - The command is written in bold, NEVER in backticks. Backticks and
+//     dollar-paren are command substitution inside a double-quoted bash string
+//     and inside an unquoted heredoc, so an agent transcribing a backticked
+//     prohibition into a -m body executes the very command being banned. That
+//     has happened (hq-baoe: cl-refinery advanced its own patrol hook and caused
 //     unrecoverable wisp overwrites purely by quoting the command in a mail
 //     body). The prohibition's own documentation is executable; keep it inert.
+//     The body below is a Go raw string literal, which is itself backtick
+//     delimited — so a backtick cannot be added to it without breaking the
+//     build. Keep it that way; do not convert it to a quoted string.
 //   - The instruction line itself is kept, not deleted, but prefixed with a
 //     DO-NOT-RUN marker so a reader can still recognize the command when they
 //     meet it elsewhere.
