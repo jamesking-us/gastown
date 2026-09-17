@@ -18,6 +18,12 @@ import (
 // sibling .flock file (see RecordBeadRespawn, ShouldBlockRespawn, etc.).
 var respawnMu sync.Mutex
 
+// respawnDecayWindow: after this long with no NEW respawn, a bead's counter is
+// treated as stale and no longer blocks re-dispatch. Self-heal for TRANSIENT bursts
+// (host-I/O-contention spawn-death, ep_poll-wedge reaps, codex gt-done boundary deaths)
+// that would otherwise poison a good bead's counter forever (2026-09-17).
+const respawnDecayWindow = 2 * time.Hour
+
 // beadRespawnRecord tracks how many times a single bead has been reset for re-dispatch.
 type beadRespawnRecord struct {
 	BeadID      string    `json:"bead_id"`
@@ -87,6 +93,12 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 	state := loadBeadRespawnState(townRoot)
 	rec, ok := state.Beads[beadID]
 	if !ok {
+		return false
+	}
+	// Self-heal: if the last respawn is older than the decay window, the transient
+	// burst that ran up this counter has passed â allow re-dispatch instead of
+	// requiring a manual `gt sling respawn-reset`.
+	if time.Since(rec.LastRespawn) > respawnDecayWindow {
 		return false
 	}
 	return rec.Count >= maxRespawns
