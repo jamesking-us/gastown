@@ -44,4 +44,20 @@ func TestInspectLeaseReportsFactsWithoutChangingState(t *testing.T) {
 	}
 }
 
+func TestInspectLeaseIncludesRecoveryFenceAndScope(t *testing.T) {
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	record := Record{
+		WorkID: "ccm-123", Rig: "cloudcontentmanager", State: StateRunning,
+		Current: &Attempt{
+			ExecutionID: "exec-1", Generation: 4, AgentID: "cloudcontentmanager/polecats/toast",
+			LeaseExpiresAt: timePointer(now.Add(-time.Minute)),
+		},
+	}
+	inspection := InspectLease(record, now)
+	if inspection.Rig != record.Rig || inspection.AgentID != record.Current.AgentID ||
+		inspection.ExecutionID != record.Current.ExecutionID || inspection.Generation != record.Current.Generation {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+}
+
 func timePointer(value time.Time) *time.Time { return &value }

@@ -15,8 +15,10 @@ const (
 // expired attempt is dead, recoverable, or eligible for replacement.
 type LeaseInspection struct {
 	WorkID           string         `json:"work_id"`
+	Rig              string         `json:"rig,omitempty"`
 	ExecutionID      string         `json:"execution_id,omitempty"`
 	Generation       uint64         `json:"generation,omitempty"`
+	AgentID          string         `json:"agent_id,omitempty"`
 	State            State          `json:"state"`
 	Condition        LeaseCondition `json:"condition"`
 	LeaseExpiresAt   *time.Time     `json:"lease_expires_at,omitempty"`
@@ -28,11 +30,13 @@ type LeaseInspection struct {
 func InspectLease(record Record, at time.Time) LeaseInspection {
 	at = normalizeTime(at)
 	inspection := LeaseInspection{
-		WorkID: record.WorkID, State: record.State, Condition: LeaseNotApplicable, InspectedAt: at,
+		WorkID: record.WorkID, Rig: record.Rig, State: record.State,
+		Condition: LeaseNotApplicable, InspectedAt: at,
 	}
 	if record.Current != nil {
 		inspection.ExecutionID = record.Current.ExecutionID
 		inspection.Generation = record.Current.Generation
+		inspection.AgentID = record.Current.AgentID
 		inspection.LeaseExpiresAt = cloneTime(record.Current.LeaseExpiresAt)
 	}
 	if !leaseBearingState(record.State) {
