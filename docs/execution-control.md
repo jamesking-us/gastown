@@ -105,11 +105,17 @@ gt execution show ccm-123 --json
 gt execution events ccm-123 --json
 gt execution verify ccm-123
 gt execution list --json
+gt execution leases --as-of 2026-09-20T18:10:00Z --json
 ```
 
 Evidence flags use `kind=value` and may be repeated. Examples include `commit=<sha>`,
 `merge_request=<id>`, and `test_run=<uri>`. Gas Town preserves these opaque references without
 assigning policy meaning to them.
+
+`gt execution leases` performs explicit clock arithmetic over stored lease timestamps. It reports
+`active`, `expired`, `missing`, or `not_applicable` and never changes an execution record. An
+external controller must apply its own grace, pause, health, and recovery policy before taking any
+action.
 
 ## Integration sequence
 

@@ -26,6 +26,7 @@ var (
 	executionReason         string
 	executionLeaseUntil     string
 	executionEvidence       []string
+	executionAsOf           string
 )
 
 var executionCmd = &cobra.Command{
@@ -188,6 +189,34 @@ var executionVerifyCmd = &cobra.Command{
 	},
 }
 
+var executionLeasesCmd = &cobra.Command{
+	Use:   "leases",
+	Short: "Inspect explicit lease timestamps without taking recovery action",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		store, err := executionStore()
+		if err != nil {
+			return err
+		}
+		asOf := time.Now().UTC()
+		if executionAsOf != "" {
+			asOf, err = time.Parse(time.RFC3339, executionAsOf)
+			if err != nil {
+				return fmt.Errorf("invalid --as-of %q (use RFC3339): %w", executionAsOf, err)
+			}
+		}
+		records, err := store.List()
+		if err != nil {
+			return err
+		}
+		inspections := make([]execution.LeaseInspection, 0, len(records))
+		for _, record := range records {
+			inspections = append(inspections, execution.InspectLease(record, asOf))
+		}
+		return printExecution(inspections)
+	},
+}
+
 func init() {
 	executionCmd.PersistentFlags().BoolVar(&executionJSON, "json", false, "Output JSON")
 	for _, command := range []*cobra.Command{executionCreateCmd, executionClaimCmd, executionTransitionCmd, executionHeartbeatCmd} {
@@ -215,9 +244,10 @@ func init() {
 		_ = command.MarkFlagRequired("generation")
 	}
 	executionTransitionCmd.Flags().StringVar(&executionReason, "reason", "", "Reason for the transition")
+	executionLeasesCmd.Flags().StringVar(&executionAsOf, "as-of", "", "Inspection time in RFC3339 format (default now)")
 
 	executionCmd.AddCommand(executionCreateCmd, executionClaimCmd, executionTransitionCmd, executionHeartbeatCmd)
-	executionCmd.AddCommand(executionShowCmd, executionListCmd, executionEventsCmd, executionVerifyCmd)
+	executionCmd.AddCommand(executionShowCmd, executionListCmd, executionEventsCmd, executionVerifyCmd, executionLeasesCmd)
 	rootCmd.AddCommand(executionCmd)
 }
 
@@ -306,6 +336,14 @@ func printExecution(value any) error {
 		}
 	case *execution.Verification:
 		fmt.Printf("%s  verified events=%d revision=%d hash=%s\n", value.WorkID, value.Events, value.Revision, value.LastHash)
+	case []execution.LeaseInspection:
+		for _, lease := range value {
+			fmt.Printf("%s  state=%s  lease=%s", lease.WorkID, lease.State, lease.Condition)
+			if lease.LeaseExpiresAt != nil {
+				fmt.Printf("  expires=%s", lease.LeaseExpiresAt.Format(time.RFC3339))
+			}
+			fmt.Println()
+		}
 	default:
 		return fmt.Errorf("unsupported execution output %s", strconv.Quote(fmt.Sprintf("%T", value)))
 	}
