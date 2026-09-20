@@ -77,6 +77,7 @@ var beadsExemptCommands = map[string]bool{
 	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator
 	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
+	"execution":     true, // Durable execution protocol is file-backed and dependency-free
 }
 
 // Commands exempt from the town root branch warning.
@@ -93,6 +94,7 @@ var branchCheckExemptCommands = map[string]bool{
 	"git-init":    true, // Git setup
 	"upgrade":     true, // Post-install migration
 	"scheduler":   true, // Daemon hot path; scheduler handles beads internally
+	"execution":   true, // Durable control records must remain writable during recovery
 }
 
 // persistentPreRun runs before every command.

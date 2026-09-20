@@ -103,6 +103,10 @@ Severity-routed issue escalation. Agents that hit blockers escalate via `gt esca
 
 Config-driven capacity governor for polecat dispatch. Prevents API rate limit exhaustion by batching dispatch under configurable concurrency limits. Default is direct dispatch; set `scheduler.max_polecats` to enable deferred dispatch with the daemon. See [Scheduler](docs/design/scheduler.md).
 
+### Durable Execution Records
+
+Generation-fenced, idempotent lifecycle records let agent wrappers and external controllers distinguish claimed, running, submitted, merged, blocked, and recoverable work across process restarts. The preview CLI records facts without dispatching agents or applying scheduling policy. See [Durable execution records](docs/execution-control.md).
+
 ### Seance 👻
 
 Session discovery and continuation. Discovers previous agent sessions via `.events.jsonl` logs, enabling agents to query their predecessors for context and decisions from earlier work.
@@ -798,6 +802,7 @@ For deeper technical details, see the design docs in `docs/`:
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |
 | Scheduler | [docs/design/scheduler.md](docs/design/scheduler.md) |
+| Durable execution records | [docs/execution-control.md](docs/execution-control.md) |
 | Wasteland | [docs/WASTELAND.md](docs/WASTELAND.md) |
 | OTEL data model | [docs/otel-data-model.md](docs/otel-data-model.md) |
 | Witness design | [docs/design/witness-at-team-lead.md](docs/design/witness-at-team-lead.md) |
