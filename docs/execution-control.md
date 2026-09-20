@@ -117,6 +117,35 @@ assigning policy meaning to them.
 external controller must apply its own grace, pause, health, and recovery policy before taking any
 action.
 
+### Controller epoch
+
+Automatic reconcilers share one durable controller lease. Acquisition is permitted only when no
+unexpired lease exists and increments a monotonic epoch. Renewal and release require both the
+controller identity and epoch, so a process that resumes after replacement cannot act under its old
+authority.
+
+```bash
+gt execution controller acquire \
+  --controller-id kingforge-controller-a \
+  --lease-until 2026-09-20T18:00:00Z \
+  --idempotency-key controller-a:acquire:1
+
+gt execution controller renew \
+  --controller-id kingforge-controller-a --epoch 1 \
+  --lease-until 2026-09-20T18:01:00Z \
+  --idempotency-key controller-a:renew:1
+
+gt execution controller show --json
+gt execution controller events --json
+gt execution controller verify
+```
+
+The controller journal is append only, hash chained, synced before its atomic snapshot, and guarded
+by the same cross-process store lock as execution records. A later owner may acquire only after
+expiry or an explicit fenced release, and receives a new epoch. The lease does not itself dispatch,
+recover, or merge work; those commands must carry and recheck the active epoch around their own
+side effects.
+
 ### Structural gate records
 
 Required gates are bound to an exact commit and a decision generation. A changed commit resets the

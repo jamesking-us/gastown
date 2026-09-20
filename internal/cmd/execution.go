@@ -350,6 +350,18 @@ func printExecution(value any) error {
 			}
 			fmt.Println()
 		}
+	case *execution.ControllerLease:
+		fmt.Printf("controller=%s  epoch=%d  revision=%d  expires=%s\n",
+			value.ControllerID, value.Epoch, value.Revision, value.LeaseExpiresAt.Format(time.RFC3339))
+	case []execution.ControllerEvent:
+		for _, event := range value {
+			fmt.Printf("%s  %s  seq=%d  epoch=%d  revision=%d  hash=%s\n",
+				event.Timestamp.Format(time.RFC3339), event.Operation, event.Sequence,
+				event.Lease.Epoch, event.Lease.Revision, event.Hash[:12])
+		}
+	case *execution.ControllerVerification:
+		fmt.Printf("controller verified events=%d epoch=%d revision=%d hash=%s\n",
+			value.Events, value.Epoch, value.Revision, value.LastHash)
 	default:
 		return fmt.Errorf("unsupported execution output %s", strconv.Quote(fmt.Sprintf("%T", value)))
 	}
