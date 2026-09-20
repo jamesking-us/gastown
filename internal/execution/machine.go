@@ -19,13 +19,13 @@ var (
 )
 
 var transitions = map[State]map[State]bool{
-	StateReady:       {StateClaimed: true, StateCancelled: true},
-	StateClaimed:     {StateStarting: true, StateRecoverable: true, StateCancelled: true},
-	StateStarting:    {StateRunning: true, StateRecoverable: true, StateBlocked: true, StateCancelled: true},
-	StateRunning:     {StateCommitting: true, StateRecoverable: true, StateBlocked: true, StateCancelled: true},
+	StateReady:       {StateClaimed: true, StateCanceled: true},
+	StateClaimed:     {StateStarting: true, StateRecoverable: true, StateCanceled: true},
+	StateStarting:    {StateRunning: true, StateRecoverable: true, StateBlocked: true, StateCanceled: true},
+	StateRunning:     {StateCommitting: true, StateRecoverable: true, StateBlocked: true, StateCanceled: true},
 	StateCommitting:  {StateSubmitted: true, StateRecoverable: true, StateBlocked: true},
 	StateSubmitted:   {StateMerged: true, StateBlocked: true},
-	StateRecoverable: {StateClaimed: true, StateCancelled: true},
+	StateRecoverable: {StateClaimed: true, StateCanceled: true},
 }
 
 func normalizeTime(t time.Time) time.Time {
@@ -194,7 +194,7 @@ func Apply(record *Record, command Command) (*Record, bool, error) {
 			t := command.At
 			next.Current.StartedAt = &t
 		}
-		if command.To == StateMerged || command.To == StateBlocked || command.To == StateCancelled {
+		if command.To == StateMerged || command.To == StateBlocked || command.To == StateCanceled {
 			t := command.At
 			next.Current.FinishedAt = &t
 		}

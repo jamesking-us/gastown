@@ -41,7 +41,7 @@ operator or an external controller.
 Lifecycle:
   ready -> claimed -> starting -> running -> committing -> submitted -> merged
 
-An attempt may move to recoverable, blocked, or cancelled. Claiming recoverable
+An attempt may move to recoverable, blocked, or canceled. Claiming recoverable
 work creates a new generation and fences updates from the prior attempt.`,
 	RunE: requireSubcommand,
 }

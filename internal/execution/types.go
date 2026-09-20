@@ -21,7 +21,7 @@ const (
 	StateMerged      State = "merged"
 	StateBlocked     State = "blocked"
 	StateRecoverable State = "recoverable"
-	StateCancelled   State = "cancelled"
+	StateCanceled    State = "canceled"
 )
 
 // Evidence is a reference to an externally verifiable artifact. The execution

@@ -28,17 +28,17 @@ stateDiagram-v2
     Running --> Recoverable
     Committing --> Recoverable
     Recoverable --> Claimed: new generation
-    Ready --> Cancelled
-    Claimed --> Cancelled
-    Starting --> Cancelled
-    Running --> Cancelled
+    Ready --> Canceled
+    Claimed --> Canceled
+    Starting --> Canceled
+    Running --> Canceled
     Starting --> Blocked
     Running --> Blocked
     Committing --> Blocked
     Submitted --> Blocked
 ```
 
-`Merged`, `Blocked`, and `Cancelled` are terminal. Claiming a `Recoverable` record archives the old
+`Merged`, `Blocked`, and `Canceled` are terminal. Claiming a `Recoverable` record archives the old
 attempt and creates a new generation. Execution IDs may not be reused within a work item.
 
 Every attempt scoped write supplies both its execution ID and generation. A stale process receives

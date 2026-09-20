@@ -110,16 +110,16 @@ func TestInvalidTransitionAndTerminalState(t *testing.T) {
 		t.Fatalf("skipped transition error = %v, want ErrInvalidTransition", err)
 	}
 
-	cancelled, _, err := Apply(record, Command{
+	canceled, _, err := Apply(record, Command{
 		Operation: "transition", IdempotencyKey: "cancel", ExecutionID: "exec-1",
-		Generation: 1, From: StateClaimed, To: StateCancelled, At: fixedTime(3),
+		Generation: 1, From: StateClaimed, To: StateCanceled, At: fixedTime(3),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = Apply(cancelled, Command{
+	_, _, err = Apply(canceled, Command{
 		Operation: "transition", IdempotencyKey: "revive", ExecutionID: "exec-1",
-		Generation: 1, From: StateCancelled, To: StateRunning, At: fixedTime(4),
+		Generation: 1, From: StateCanceled, To: StateRunning, At: fixedTime(4),
 	})
 	if !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("terminal transition error = %v, want ErrInvalidTransition", err)
