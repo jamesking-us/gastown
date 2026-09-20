@@ -38,8 +38,8 @@ func TestStructuralGateCheckIsScopedToCanaryRig(t *testing.T) {
 	t.Setenv(executionGatesEnabledEnv, "true")
 	t.Setenv(executionGateCanaryEnv, "ccm")
 	t.Setenv(executionRequiredEnv, "quality")
-	e := &Engineer{rig: &rig.Rig{Path: t.TempDir()}}
-	if err := e.checkStructuralExecutionGates(&MRInfo{ID: "mr-1", Rig: "other"}); err != nil {
+	e := &Engineer{rig: &rig.Rig{Name: "other", Path: t.TempDir()}}
+	if err := e.checkStructuralExecutionGates(&MRInfo{ID: "mr-1", Rig: "ccm"}); err != nil {
 		t.Fatalf("non-canary rig was evaluated: %v", err)
 	}
 }
@@ -90,5 +90,32 @@ func TestStructuralGateEvaluationFailsClosedAndAcceptsExactCommit(t *testing.T) 
 	mr.CommitSHA = "changed"
 	if err := e.evaluateStructuralExecutionGates(mr, []string{"quality", "compliance"}); err == nil || !strings.Contains(err.Error(), "[compliance,quality]") {
 		t.Fatalf("changed commit error=%v", err)
+	}
+}
+
+func TestStructuralGateEvaluationRejectsRecordFromAnotherRig(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(town, "ccm")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	store := execution.NewStore(town)
+	if _, err := store.Create(execution.CreateRequest{
+		WorkID: "ccm-wrong-rig", Rig: "other", IdempotencyKey: "create", At: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engineer{rig: &rig.Rig{Name: "ccm", Path: rigPath}}
+	err := e.evaluateStructuralExecutionGates(
+		&MRInfo{ID: "mr-1", SourceIssue: "ccm-wrong-rig", CommitSHA: "abc"}, []string{"quality"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match refinery rig") {
+		t.Fatalf("rig mismatch error=%v", err)
 	}
 }

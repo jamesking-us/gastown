@@ -234,7 +234,7 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 			result.Error = fmt.Errorf("structural execution gates: %w", policyErr)
 			return result
 		}
-		if !policy.enabled || policy.canaryRig != strings.TrimSpace(mr.Rig) {
+		if !policy.enabled || e.rig == nil || policy.canaryRig != strings.TrimSpace(e.rig.Name) {
 			continue
 		}
 		if _, shaErr := e.submittedBranchHead(mr); shaErr != nil {

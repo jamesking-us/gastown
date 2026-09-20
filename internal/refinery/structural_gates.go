@@ -62,7 +62,7 @@ func (e *Engineer) checkStructuralExecutionGates(mr *MRInfo) error {
 	if err != nil {
 		return err
 	}
-	if !policy.enabled || policy.canaryRig != strings.TrimSpace(mr.Rig) {
+	if !policy.enabled || e.rig == nil || policy.canaryRig != strings.TrimSpace(e.rig.Name) {
 		return nil
 	}
 	return e.evaluateStructuralExecutionGates(mr, policy.required)
@@ -84,6 +84,9 @@ func (e *Engineer) evaluateStructuralExecutionGates(mr *MRInfo, required []strin
 	record, err := execution.NewStore(townRoot).Load(workID)
 	if err != nil {
 		return fmt.Errorf("load execution record for %s: %w", workID, err)
+	}
+	if strings.TrimSpace(record.Rig) != strings.TrimSpace(e.rig.Name) {
+		return fmt.Errorf("execution record rig %q does not match refinery rig %q", record.Rig, e.rig.Name)
 	}
 	evaluation := execution.EvaluateRequiredGates(*record, commit, required)
 	if evaluation.Ready {
