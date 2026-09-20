@@ -110,3 +110,34 @@ func TestGateCommandsAreIdempotentAndSorted(t *testing.T) {
 		t.Fatalf("evaluation=%+v", evaluation)
 	}
 }
+
+func TestEvaluateRequiredGatesTreatsMissingPolicyGateAsPending(t *testing.T) {
+	record := readyRecord(t)
+	evaluation := EvaluateRequiredGates(*record, "abc", []string{"compliance", "quality", "quality", ""})
+	if evaluation.Ready || len(evaluation.Pending) != 2 {
+		t.Fatalf("evaluation=%+v", evaluation)
+	}
+	if evaluation.Pending[0].Name != "compliance" || evaluation.Pending[1].Name != "quality" {
+		t.Fatalf("pending=%+v", evaluation.Pending)
+	}
+	for _, gate := range evaluation.Pending {
+		if gate.Commit != "abc" || gate.Status != GatePending || !gate.Required {
+			t.Fatalf("synthetic pending gate=%+v", gate)
+		}
+	}
+}
+
+func TestEvaluateRequiredGatesAlsoHonorsRecordedRequirements(t *testing.T) {
+	record := readyRecord(t)
+	record, _, err := ApplyGate(record, GateCommand{
+		Operation: "require", Name: "security", Commit: "abc",
+		IdempotencyKey: "require-security", Actor: "policy", At: fixedTime(2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluation := EvaluateRequiredGates(*record, "abc", []string{"quality"})
+	if evaluation.Ready || len(evaluation.Pending) != 2 {
+		t.Fatalf("evaluation=%+v", evaluation)
+	}
+}

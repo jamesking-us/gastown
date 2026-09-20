@@ -228,6 +228,24 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	if !e.recheckBatchEligibility(batch, target, result) {
 		return result
 	}
+	for _, mr := range batch {
+		policy, policyErr := structuralGatePolicyFromEnvironment()
+		if policyErr != nil {
+			result.Error = fmt.Errorf("structural execution gates: %w", policyErr)
+			return result
+		}
+		if !policy.enabled || policy.canaryRig != strings.TrimSpace(mr.Rig) {
+			continue
+		}
+		if _, shaErr := e.submittedBranchHead(mr); shaErr != nil {
+			result.Error = fmt.Errorf("structural execution gates: %w", shaErr)
+			return result
+		}
+		if gateErr := e.evaluateStructuralExecutionGates(mr, policy.required); gateErr != nil {
+			result.Error = fmt.Errorf("structural execution gates: %w", gateErr)
+			return result
+		}
+	}
 
 	// Step 1: Build the stack
 	stacked, conflicts, err := e.BuildRebaseStack(ctx, batch, target)

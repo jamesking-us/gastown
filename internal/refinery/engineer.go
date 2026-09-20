@@ -534,6 +534,9 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	if err != nil {
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
+	if err := e.checkStructuralExecutionGates(mr); err != nil {
+		return ProcessResult{Success: false, Error: fmt.Sprintf("structural execution gates: %v", err)}
+	}
 
 	// Step 2: Checkout the target branch
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking out target branch %s...\n", target)

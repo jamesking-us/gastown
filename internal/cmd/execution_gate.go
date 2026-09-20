@@ -12,6 +12,7 @@ var (
 	executionGateCommit     string
 	executionGateGeneration uint64
 	executionGateDecidedBy  string
+	executionGateRequired   []string
 )
 
 var executionGateCmd = &cobra.Command{
@@ -80,7 +81,7 @@ var executionGateStatusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		evaluation := execution.EvaluateGates(*record, executionGateCommit)
+		evaluation := execution.EvaluateRequiredGates(*record, executionGateCommit, executionGateRequired)
 		if executionJSON {
 			return printExecution(&evaluation)
 		}
@@ -107,6 +108,7 @@ func init() {
 	executionGateDecideCmd.Flags().StringSliceVar(&executionEvidence, "evidence", nil, "Evidence reference as kind=value (repeatable)")
 	executionGateStatusCmd.Flags().StringVar(&executionGateCommit, "commit", "", "Exact submitted commit (required)")
 	_ = executionGateStatusCmd.MarkFlagRequired("commit")
+	executionGateStatusCmd.Flags().StringSliceVar(&executionGateRequired, "required", nil, "Policy-required gate name (repeatable or comma-separated)")
 
 	executionGateCmd.AddCommand(executionGateRequireCmd, executionGateDecideCmd, executionGateStatusCmd)
 	executionCmd.AddCommand(executionGateCmd)

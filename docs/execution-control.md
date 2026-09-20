@@ -133,12 +133,28 @@ gt execution gate decide ccm-123 compliance passed \
   --evidence review=lw://review/42 \
   --idempotency-key ccm-123:gate:compliance:abc123:pass
 
-gt execution gate status ccm-123 --commit abc123 --json
+gt execution gate status ccm-123 --commit abc123 \
+  --required compliance,quality --json
 ```
 
-Gate status is `pending`, `passed`, `blocked`, or `superseded`. The evaluator is read only. Refinery
-enforcement must remain behind a separate rollout flag until shadow verdicts agree with current
-quality and compliance decisions.
+Gate status is `pending`, `passed`, `blocked`, or `superseded`. The evaluator is read only. Names
+supplied through `--required` are policy requirements: a missing record is reported as pending, so
+an empty gate set cannot become an implicit approval.
+
+Refinery enforcement is implemented but disabled by default. Arming it requires all three values:
+
+```bash
+GT_EXECUTION_GATES_ENABLED=true
+GT_EXECUTION_GATE_CANARY_RIG=cloudcontentmanager
+GT_EXECUTION_REQUIRED_GATES=compliance,quality
+```
+
+Only merge requests whose recorded rig exactly matches the canary are checked. Both the sequential
+and batch merge paths verify the submitted branch head first, then require every named gate to be
+passed for that exact commit before modifying the target branch. Missing execution records,
+missing gate records, stale commit verdicts, blocked verdicts, and incomplete policy configuration
+all fail closed. Keep enforcement unset until KingForge shadow verdicts agree with current quality
+and compliance decisions.
 
 ## Integration sequence
 
@@ -147,7 +163,9 @@ quality and compliance decisions.
 3. Compare records with Beads, sessions, commits, and merge requests.
 4. Add the Codex completion handshake behind its own disabled flag.
 5. Add advisory lease evaluation. Evaluation reports facts and takes no recovery action.
-6. Enable fenced recovery only after the canary evidence meets the KingForge rollout criteria.
+6. Compare structural gate records with existing review decisions in shadow mode.
+7. Enable commit-bound refinery enforcement only for the selected canary rig.
+8. Enable fenced recovery only after the canary evidence meets the KingForge rollout criteria.
 
 Older Gas Town binaries ignore `.runtime/executions`. Rollback stops writers and restores the pinned
 binary; the journal remains available for investigation and later replay.

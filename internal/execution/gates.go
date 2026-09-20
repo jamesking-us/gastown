@@ -94,9 +94,41 @@ func gateFingerprint(command GateCommand) (string, error) {
 }
 
 func EvaluateGates(record Record, commit string) GateEvaluation {
+	required := make([]string, 0, len(record.Gates))
+	for name, gate := range record.Gates {
+		if gate.Required {
+			required = append(required, name)
+		}
+	}
+	return EvaluateRequiredGates(record, commit, required)
+}
+
+// EvaluateRequiredGates evaluates both the policy-required gate names and any
+// additional required gates already attached to the record. A policy-required
+// gate with no record is pending, so an empty record cannot become an implicit
+// approval.
+func EvaluateRequiredGates(record Record, commit string, required []string) GateEvaluation {
 	evaluation := GateEvaluation{WorkID: record.WorkID, Commit: commit, Ready: true}
-	for _, gate := range record.Gates {
-		if !gate.Required {
+	names := make(map[string]struct{}, len(required)+len(record.Gates))
+	for _, name := range required {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	for name, gate := range record.Gates {
+		if gate.Required {
+			names[name] = struct{}{}
+		}
+	}
+	for name := range names {
+		gate, exists := record.Gates[name]
+		if !exists || !gate.Required {
+			evaluation.Pending = append(evaluation.Pending, Gate{
+				Name: name, Required: true, Status: GatePending, Commit: commit,
+				Reason: "required gate record is missing",
+			})
+			evaluation.Ready = false
 			continue
 		}
 		classified := gate
