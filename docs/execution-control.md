@@ -117,6 +117,29 @@ assigning policy meaning to them.
 external controller must apply its own grace, pause, health, and recovery policy before taking any
 action.
 
+### Structural gate records
+
+Required gates are bound to an exact commit and a decision generation. A changed commit resets the
+gate to `pending` and increments the generation, so an earlier review cannot approve new content.
+
+```bash
+gt execution gate require ccm-123 compliance \
+  --commit abc123 --actor policy \
+  --idempotency-key ccm-123:gate:compliance:abc123
+
+gt execution gate decide ccm-123 compliance passed \
+  --commit abc123 --decision-generation 1 \
+  --decided-by cloudcontentmanager/crew/compliance \
+  --evidence review=lw://review/42 \
+  --idempotency-key ccm-123:gate:compliance:abc123:pass
+
+gt execution gate status ccm-123 --commit abc123 --json
+```
+
+Gate status is `pending`, `passed`, `blocked`, or `superseded`. The evaluator is read only. Refinery
+enforcement must remain behind a separate rollout flag until shadow verdicts agree with current
+quality and compliance decisions.
+
 ## Integration sequence
 
 1. Run the KingForge observer with every control capability false.

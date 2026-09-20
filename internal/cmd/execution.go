@@ -336,6 +336,12 @@ func printExecution(value any) error {
 		}
 	case *execution.Verification:
 		fmt.Printf("%s  verified events=%d revision=%d hash=%s\n", value.WorkID, value.Events, value.Revision, value.LastHash)
+	case *execution.GateEvaluation:
+		encoded, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
 	case []execution.LeaseInspection:
 		for _, lease := range value {
 			fmt.Printf("%s  state=%s  lease=%s", lease.WorkID, lease.State, lease.Condition)

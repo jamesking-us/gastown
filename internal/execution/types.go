@@ -67,6 +67,7 @@ type Record struct {
 	Current       *Attempt           `json:"current_attempt,omitempty"`
 	History       []Attempt          `json:"attempt_history,omitempty"`
 	Receipts      map[string]Receipt `json:"receipts,omitempty"`
+	Gates         map[string]Gate    `json:"gates,omitempty"`
 }
 
 // Command identifies one requested state change. IdempotencyKey must be
@@ -120,4 +121,49 @@ type Verification struct {
 	Events   uint64 `json:"events"`
 	LastHash string `json:"last_hash,omitempty"`
 	Revision uint64 `json:"revision"`
+}
+
+type GateStatus string
+
+const (
+	GatePending    GateStatus = "pending"
+	GatePassed     GateStatus = "passed"
+	GateBlocked    GateStatus = "blocked"
+	GateSuperseded GateStatus = "superseded"
+)
+
+// Gate is a required, commit-bound merge decision. Changing the commit creates
+// a new decision generation and returns the gate to pending.
+type Gate struct {
+	Name               string     `json:"name"`
+	Required           bool       `json:"required"`
+	Status             GateStatus `json:"status"`
+	Commit             string     `json:"commit"`
+	DecisionGeneration uint64     `json:"decision_generation"`
+	DecidedBy          string     `json:"decided_by,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
+	Evidence           []Evidence `json:"evidence,omitempty"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type GateCommand struct {
+	Operation          string     `json:"operation"`
+	Name               string     `json:"name"`
+	Commit             string     `json:"commit"`
+	Status             GateStatus `json:"status,omitempty"`
+	DecisionGeneration uint64     `json:"decision_generation,omitempty"`
+	IdempotencyKey     string     `json:"idempotency_key"`
+	Actor              string     `json:"actor,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
+	Evidence           []Evidence `json:"evidence,omitempty"`
+	At                 time.Time  `json:"at"`
+}
+
+type GateEvaluation struct {
+	WorkID  string `json:"work_id"`
+	Commit  string `json:"commit"`
+	Ready   bool   `json:"ready"`
+	Pending []Gate `json:"pending,omitempty"`
+	Blocked []Gate `json:"blocked,omitempty"`
+	Passed  []Gate `json:"passed,omitempty"`
 }

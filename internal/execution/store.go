@@ -81,6 +81,28 @@ func (s *Store) Apply(workID string, command Command) (*Record, error) {
 	return result, err
 }
 
+func (s *Store) ApplyGate(workID string, command GateCommand) (*Record, error) {
+	var result *Record
+	err := s.withLock(func() error {
+		record, _, err := s.loadUnlocked(workID)
+		if err != nil {
+			return err
+		}
+		next, changed, err := ApplyGate(record, command)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if err := s.appendAndSnapshot(next, "gate-"+command.Operation, command.IdempotencyKey, command.Actor); err != nil {
+				return err
+			}
+		}
+		result = cloneRecord(next)
+		return nil
+	})
+	return result, err
+}
+
 // Load replays the authoritative journal and repairs a stale snapshot.
 func (s *Store) Load(workID string) (*Record, error) {
 	var result *Record
