@@ -122,3 +122,18 @@ assigning policy meaning to them.
 
 Older Gas Town binaries ignore `.runtime/executions`. Rollback stops writers and restores the pinned
 binary; the journal remains available for investigation and later replay.
+
+## Optional `gt done` handshake
+
+`GT_EXECUTION_HANDSHAKE_ENABLED=true` makes a completed `gt done` participate in the active fenced
+record. The command validates that the caller owns the current attempt, records `Running →
+Committing` before push or merge queue work, then records `Committing → Submitted` with commit and
+merge request evidence before it clears the hook or retires the polecat session.
+
+The handshake is resumable. A repeated `gt done` accepts `Committing` after an interrupted push and
+accepts `Submitted` after a completed durable handoff. A failed push or merge request leaves the
+record at `Committing` and preserves the session under the existing `gt done` recovery behavior. A
+replacement generation or different owner is rejected before mutation.
+
+The environment variable is unset by default. Runtime integrations should expose their own rollout
+flag and set this variable only for a selected canary seat after shadow records prove accurate.

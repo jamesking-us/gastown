@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/execution"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -992,6 +993,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// If gt done was interrupted (SIGTERM, context exhaustion, SIGKILL),
 	// checkpoints indicate which stages completed. On re-invocation, we
 	// skip those stages to avoid repeating work or hitting errors.
+	var executionHandshake *doneExecutionHandshake
+	if exitType == ExitCompleted && executionHandshakeEnabled() {
+		executionHandshake, err = beginDoneExecution(execution.NewStore(townRoot), issueID, sender, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("execution completion handshake: %w", err)
+		}
+	}
+
 	checkpoints := map[DoneCheckpoint]string{}
 	if agentBeadID != "" {
 		// Agent bead lives in town DB despite rig prefix — bypass routing.
@@ -1960,6 +1969,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 notifyWitness:
+	// A managed polecat may not clear its hook or retire until the verified
+	// submission is durable in the fenced execution record. Failed push/MR
+	// paths intentionally remain Committing and preserve the session below.
+	if executionHandshake != nil && !pushFailed && !mrFailed {
+		commit, _ := g.Rev("HEAD")
+		if err := executionHandshake.Submit(mrID, commit, time.Now().UTC()); err != nil {
+			return fmt.Errorf("execution completion handshake: %w", err)
+		}
+	}
+
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
 	if shouldNudgeRefinery(exitType, mrID) {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
