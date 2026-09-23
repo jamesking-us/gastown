@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 17
+version = 18
 
 [vars]
 [vars.wisp_type]
@@ -643,9 +643,58 @@ re-implementing fixes. You are a mechanical merge processor.
 This is non-negotiable. Never disavow. Never "note and proceed." """
 
 [[steps]]
+id = "compliance-gate"
+title = "Classify and enforce the cl-068 compliance gate"
+needs = ["handle-failures"]
+description = """
+This gate is independent of quality review. Run it even when
+`judgment_enabled=false`.
+
+**Scope:** This step is **NOT_APPLICABLE** outside the
+`cloudcontentmanager` rig. Record `compliance classification: NOT_APPLICABLE
+(non-CCM rig)` on the MR bead and proceed to merge-push without changing that
+rig's existing merge path.
+
+For CloudContentManager, read these version-controlled authorities before making
+any classification; do not transcribe their grammar into this formula:
+
+- `docs/compliance-log.md` — attachment classification authority.
+- `docs/compliance-gate-procedure.md` — gate operation authority.
+
+Read the complete MR bead and its diff. Classify and name all of the following
+on the MR bead: ground 1 (protected-surface paths), ground 2
+(adjacency/mediation), ground 3 (traceability substrate), and the separate
+`checklist control` result. A diff changing
+`docs/compliance-review-checklist.md` makes `checklist control: fires`; still
+run and name all three ordinary grounds. Attribute a path to the surface it
+actually implements rather than matching words in its name.
+
+If all three grounds clear and the checklist control does not fire, record
+`compliance classification: NOT_TRIGGERED` with the named grounds and checklist
+result. Only that explicit classification may use the existing strategy-specific
+merge path.
+
+If any ground or the checklist control fires, record
+`compliance classification: TRIGGERED` with the named results. A triggered MR
+requires the live, authorized compliance verdict described by the procedure.
+For a direct merge to `main`, merge-push invokes the repository-owned
+`tools/refinery/safemerge.sh <full-mr-id>`; the wrapper is the sole merge
+command and performs the verdict screen and merge.
+
+**Fail closed:** missing authorities, unreadable or incomplete MR data, an
+ambiguous classification, no recorded classification, missing `commit_sha`, an
+unparseable verdict, a missing wrapper, a wrapper/tool error, PR strategy, or a
+target other than `main` is a **HOLD**, never NOT_TRIGGERED. Comment the HOLD on
+the MR bead, mail the mayor and both configured compliance seats as applicable,
+and leave the MR and branch open. Skip cleanup and do not delete the branch.
+
+Record the classification before continuing so merge-push can re-read it rather
+than relying on a remembered decision."""
+
+[[steps]]
 id = "merge-push"
 title = "Merge and push"
-needs = ["handle-failures"]
+needs = ["compliance-gate"]
 description = """
 Merge and push. CRITICAL: verified post-merge cleanup comes immediately after push;
 send MERGED only after `gt mq post-merge` succeeds.
@@ -660,7 +709,40 @@ send MERGED only after `gt mq post-merge` succeeds.
 
 Determine `<merge-target>` using the **Target Resolution Rule** above.
 
+**First re-read the classification recorded by compliance-gate.** Missing,
+unreadable, ambiguous, or unparseable classification is a HOLD: comment it on
+the MR bead, mail the mayor and both configured compliance seats as applicable,
+leave the MR and branch open, and skip cleanup.
+
+**If this is a CloudContentManager MR classified TRIGGERED:** only the `direct`
+strategy targeting `main` is supported. Require the full MR bead id,
+`commit_sha`, and executable `tools/refinery/safemerge.sh`. Any PR strategy,
+target other than `main`, missing state, missing wrapper, or tool error is a
+HOLD; comment it, mail the mayor and both configured compliance seats as
+applicable, leave the MR and branch open, and skip cleanup.
+
+For the supported shape, start from a clean checked-out `main` and run the
+wrapper without a pipeline, retaining a terminated evidence log and capturing
+its exit status immediately:
+
+```bash
+SAFE_MERGE_LOG=$(mktemp "${TMPDIR:-/tmp}/safemerge-<mr-bead-id>.XXXXXXXX.log")
+./tools/refinery/safemerge.sh <full-mr-id> >"$SAFE_MERGE_LOG" 2>&1
+SAFE_MERGE_RC=$?
+printf 'SAFE_MERGE_RC=%s\\n' "$SAFE_MERGE_RC" >>"$SAFE_MERGE_LOG"
+```
+
+Continue only when `SAFE_MERGE_RC=0` and the log contains the wrapper's positive
+release evidence. On any other result, HOLD using the notification and
+no-cleanup procedure above. `safemerge.sh` performs the merge: **MUST NOT run a
+second raw `git merge` after it.** After its success, push and run the existing
+remote-SHA and post-merge checks below, but do not use the generic raw-merge
+commands.
+
 **If merge_strategy = "direct" (default):**
+
+For non-CCM rigs and CCM MRs explicitly classified NOT_TRIGGERED, use the
+existing direct merge path:
 
 ```bash
 git checkout <merge-target>
