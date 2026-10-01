@@ -14,6 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -34,13 +35,18 @@ const (
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
 type strandedConvoyInfo struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	TrackedCount int       `json:"tracked_count"`
-	ReadyCount   int       `json:"ready_count"`
-	ReadyIssues  []string  `json:"ready_issues"`
-	CreatedAt    time.Time `json:"created_at"`
-	BaseBranch   string    `json:"base_branch,omitempty"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	TrackedCount int      `json:"tracked_count"`
+	ReadyCount   int      `json:"ready_count"`
+	ReadyIssues  []string `json:"ready_issues"`
+	// ReadyAssignees maps a ready issue ID to its assignee, when it has one
+	// (absent for unassigned issues or for a stranded response produced by a
+	// gt binary older than gt-azq). feedFirstReady uses it as a defense-in-
+	// depth backstop, independent of isReadyIssue's own seat-kind filtering.
+	ReadyAssignees map[string]string `json:"ready_assignees,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	BaseBranch     string            `json:"base_branch,omitempty"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -558,6 +564,18 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// Defense in depth (gt-azq): independently re-check the assignee
+		// using a code path separate from isReadyIssue's own seat-kind
+		// filtering (internal/cmd/convoy.go), so a regression in that
+		// predicate alone can't make this daemon sling a bead owned by a
+		// non-polecat seat (crew, witness, refinery, mayor, deacon). A
+		// missing entry (no assignee, or a stranded response from a gt
+		// binary older than gt-azq) is not blocking.
+		if assignee, blocked := nonPolecatSeatAssignee(c.ReadyAssignees[issueID]); blocked {
+			m.logger("Convoy %s: %s is assigned to non-polecat seat %q, refusing to sling", c.ID, issueID, assignee)
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
@@ -579,6 +597,20 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// nonPolecatSeatAssignee reports whether assignee identifies a seat other
+// than a polecat (crew, witness, refinery, mayor, deacon). An empty assignee
+// (unassigned, or no information available) is never blocking. (gt-azq)
+func nonPolecatSeatAssignee(assignee string) (string, bool) {
+	if assignee == "" {
+		return "", false
+	}
+	identity, err := session.ParseAddress(assignee)
+	if err != nil || identity.Role != session.RolePolecat {
+		return assignee, true
+	}
+	return assignee, false
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose

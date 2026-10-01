@@ -72,6 +72,112 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 	}
 }
 
+// TestIsReadyIssue_SeatKind covers gt-azq: the convoy feeder dispatches by
+// spawning a polecat, so only a polecat-assigned (or unassigned) issue may
+// ever be reported ready — regardless of whether a non-polecat assignee's
+// session happens to be alive or dead.
+func TestIsReadyIssue_SeatKind(t *testing.T) {
+	const fakeRig = "zzztestrig9q7z"
+
+	tests := []struct {
+		name string
+		in   trackedIssueInfo
+		want bool
+	}{
+		{
+			name: "crew-assigned with dead session not ready",
+			in: trackedIssueInfo{
+				Status:   "hooked",
+				Assignee: fakeRig + "/crew/architect",
+			},
+			want: false,
+		},
+		{
+			name: "witness-assigned not ready",
+			in: trackedIssueInfo{
+				Status:   "in_progress",
+				Assignee: fakeRig + "/witness",
+			},
+			want: false,
+		},
+		{
+			name: "refinery-assigned not ready",
+			in: trackedIssueInfo{
+				Status:   "in_progress",
+				Assignee: fakeRig + "/refinery",
+			},
+			want: false,
+		},
+		{
+			name: "mayor-assigned not ready",
+			in: trackedIssueInfo{
+				Status:   "in_progress",
+				Assignee: "mayor",
+			},
+			want: false,
+		},
+		{
+			name: "deacon-assigned not ready",
+			in: trackedIssueInfo{
+				Status:   "in_progress",
+				Assignee: "deacon",
+			},
+			want: false,
+		},
+		{
+			name: "unassigned open issue ready",
+			in: trackedIssueInfo{
+				Status: "open",
+			},
+			want: true,
+		},
+		{
+			name: "polecat-assigned with dead session ready (unchanged)",
+			in: trackedIssueInfo{
+				Status:   "in_progress",
+				Assignee: fakeRig + "/polecats/ghost-9q7z",
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isReadyIssue(tc.in, nil)
+			if got != tc.want {
+				t.Fatalf("isReadyIssue(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsPolecatAssignee(t *testing.T) {
+	tests := []struct {
+		assignee string
+		want     bool
+	}{
+		{"gastown/polecats/furiosa", true},
+		{"gastown/furiosa", true}, // legacy 2-part shorthand
+		{"gastown/crew/architect", false},
+		{"gastown/witness", false},
+		{"gastown/refinery", false},
+		{"mayor", false},
+		{"mayor/", false},
+		{"deacon", false},
+		{"", false},
+		{"not valid/too/many/parts", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.assignee, func(t *testing.T) {
+			got := isPolecatAssignee(tc.assignee)
+			if got != tc.want {
+				t.Fatalf("isPolecatAssignee(%q) = %v, want %v", tc.assignee, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
 	dep := trackedDependency{
 		ID:     "gt-123",

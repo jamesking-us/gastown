@@ -1507,8 +1507,12 @@ type strandedConvoyInfo struct {
 	TrackedCount int      `json:"tracked_count"`
 	ReadyCount   int      `json:"ready_count"`
 	ReadyIssues  []string `json:"ready_issues"`
-	CreatedAt    string   `json:"created_at,omitempty"`
-	BaseBranch   string   `json:"base_branch,omitempty"`
+	// ReadyAssignees maps a ready issue ID to its assignee, when it has one.
+	// Lets a consumer (e.g. the daemon's feedFirstReady) independently
+	// re-verify the seat kind right before dispatch. (gt-azq)
+	ReadyAssignees map[string]string `json:"ready_assignees,omitempty"`
+	CreatedAt      string            `json:"created_at,omitempty"`
+	BaseBranch     string            `json:"base_branch,omitempty"`
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1651,6 +1655,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		scheduledSet := areScheduled(trackedIDs)
 
 		var readyIssues []string
+		readyAssignees := map[string]string{}
 		for _, t := range tracked {
 			if isReadyIssue(t, scheduledSet) {
 				if !isSlingableBead(townBeads, t.ID) {
@@ -1660,18 +1665,32 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 					continue
 				}
 				readyIssues = append(readyIssues, t.ID)
+				if t.Assignee != "" {
+					readyAssignees[t.ID] = t.Assignee
+				}
+			} else if seat := nonPolecatSeatDescription(t.Assignee); seat != "" {
+				// Make the stranded-but-unfeedable state visible to a human
+				// running `gt convoy stranded` directly. Written to stderr
+				// (not stdout, which the daemon parses as JSON — #2142) so
+				// it never corrupts the machine-readable output; the daemon
+				// itself only reads this subprocess's stderr on a non-zero
+				// exit, so this does not add per-tick noise to daemon.log.
+				// Printed at most once here since this scan evaluates each
+				// tracked issue exactly once per invocation. (gt-azq)
+				fmt.Fprintf(os.Stderr, "⚠ Convoy %s: %s stranded but unfeedable — assignee %s is %s, not a polecat\n", convoy.ID, t.ID, t.Assignee, seat)
 			}
 		}
 
 		if len(readyIssues) > 0 {
 			stranded = append(stranded, strandedConvoyInfo{
-				ID:           convoy.ID,
-				Title:        convoy.Title,
-				TrackedCount: len(tracked),
-				ReadyCount:   len(readyIssues),
-				ReadyIssues:  readyIssues,
-				CreatedAt:    convoy.CreatedAt,
-				BaseBranch:   baseBranch,
+				ID:             convoy.ID,
+				Title:          convoy.Title,
+				TrackedCount:   len(tracked),
+				ReadyCount:     len(readyIssues),
+				ReadyIssues:    readyIssues,
+				ReadyAssignees: readyAssignees,
+				CreatedAt:      convoy.CreatedAt,
+				BaseBranch:     baseBranch,
 			})
 		} else {
 			// Has tracked issues but none are ready — include in stranded
@@ -1693,9 +1712,16 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 
 // isReadyIssue checks if an issue is ready for dispatch (stranded).
 // An issue is ready if:
-// - status = "open" AND (no assignee OR assignee session is dead)
-// - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
-// - AND not blocked (cross-rig-aware from issue details)
+//   - status = "open" AND (no assignee OR assignee session is dead)
+//   - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
+//   - AND not blocked (cross-rig-aware from issue details)
+//   - AND, when assigned, the assignee is a polecat seat — the convoy feeder
+//     dispatches by spawning a polecat (gt sling), so a bead owned by any
+//     other seat kind (crew, witness, refinery, mayor, deacon) is never
+//     ready for it, whether or not that seat's session happens to be alive.
+//     A stopped crew/witness/etc. seat means "restart that seat", not "hand
+//     its work to a fresh polecat". (gt-azq)
+//
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	status := strings.TrimSpace(t.Status)
@@ -1733,11 +1759,18 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return true
 	}
 
+	// Has assignee - the convoy feeder only ever dispatches to a polecat.
+	// Reject crew/witness/refinery/mayor/deacon (and anything unrecognized)
+	// before even considering session liveness.
+	if !isPolecatAssignee(t.Assignee) {
+		return false
+	}
+
 	// Has assignee - check if session is alive
 	// Use the shared assigneeToSessionName from rig.go
 	sessionName, _ := assigneeToSessionName(t.Assignee)
 	if sessionName == "" {
-		return true // Can't determine session = treat as ready
+		return false // Can't determine session = not safe to dispatch (fail closed)
 	}
 
 	// Check if tmux session exists
@@ -1750,6 +1783,35 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	}
 
 	return false // Session exists = worker is active
+}
+
+// isPolecatAssignee reports whether assignee identifies a polecat seat, as
+// opposed to crew, witness, refinery, mayor, deacon, or any other non-polecat
+// seat kind. Delegates to session.ParseAddress, the canonical parser for
+// mail-style agent addresses, so this classification can never drift from
+// how the rest of the town resolves the same addresses. An address that
+// fails to parse is treated as NOT a polecat (fail closed) rather than
+// guessed as ready. (gt-azq)
+func isPolecatAssignee(assignee string) bool {
+	identity, err := session.ParseAddress(assignee)
+	return err == nil && identity.Role == session.RolePolecat
+}
+
+// nonPolecatSeatDescription returns a human-readable seat-kind label for a
+// non-polecat assignee (e.g. "crew", "witness"), or "" if assignee is empty
+// or identifies a polecat. Used only for diagnostic logging.
+func nonPolecatSeatDescription(assignee string) string {
+	if assignee == "" {
+		return ""
+	}
+	identity, err := session.ParseAddress(assignee)
+	if err != nil {
+		return "unrecognized"
+	}
+	if identity.Role == session.RolePolecat {
+		return ""
+	}
+	return string(identity.Role)
 }
 
 // isSlingableBead reports whether a bead can be dispatched via gt sling.

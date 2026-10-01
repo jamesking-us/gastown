@@ -1149,6 +1149,127 @@ exit 0
 	}
 }
 
+// TestFeedFirstReady_CrewAssignee_RefusesSling covers gt-azq's defense-in-
+// depth backstop: even if an issue shows up in ReadyIssues, feedFirstReady
+// must independently refuse to sling it when ReadyAssignees says the
+// current assignee is a crew (or other non-polecat) seat.
+func TestFeedFirstReady_CrewAssignee_RefusesSling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Crew Assigned",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-crewbead"},
+		ReadyAssignees: map[string]string{
+			"gt-crewbead": "gastown/crew/architect",
+		},
+	}
+	m.feedFirstReady(c)
+
+	if _, err := os.Stat(slingLogPath); err == nil {
+		data, _ := os.ReadFile(slingLogPath)
+		t.Errorf("sling was called for crew-assigned issue: %s", data)
+	}
+
+	refused := false
+	for _, s := range logged {
+		if strings.Contains(s, "gt-crewbead") && strings.Contains(s, "non-polecat") && strings.Contains(s, "gastown/crew/architect") {
+			refused = true
+			break
+		}
+	}
+	if !refused {
+		t.Errorf("expected refusal log for crew-assigned gt-crewbead, got: %v", logged)
+	}
+}
+
+// TestFeedFirstReady_PolecatAssignee_StillDispatches is the companion to
+// TestFeedFirstReady_CrewAssignee_RefusesSling: a polecat (or unassigned)
+// ready issue must still be dispatched, so the new defense-in-depth check
+// doesn't regress the normal path.
+func TestFeedFirstReady_PolecatAssignee_StillDispatches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Polecat Assigned",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-polebead"},
+		ReadyAssignees: map[string]string{
+			"gt-polebead": "gastown/polecats/furiosa",
+		},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("expected sling for polecat-assigned issue, got none: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-polebead") {
+		t.Errorf("expected sling call for gt-polebead, got: %q", string(data))
+	}
+}
+
 func TestFeedFirstReady_EmptyReadyIssues_NoOp(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
