@@ -14,6 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -558,6 +559,18 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// Defense in depth (gt-azq): re-verify the CURRENT assignee right
+		// before dispatch, independent of the seat-kind check isReadyIssue
+		// (internal/cmd/convoy.go) already applied when `gt convoy stranded`
+		// built c.ReadyIssues moments earlier. The convoy feeder must never
+		// sling a bead owned by a non-polecat seat (crew, witness, refinery,
+		// mayor, deacon) — whether because that check regresses, or because
+		// the assignee changed in the window between scan and dispatch.
+		if assignee, blocked := m.assigneeBlocksDispatch(issueID); blocked {
+			m.logger("Convoy %s: %s is assigned to non-polecat seat %q, refusing to sling", c.ID, issueID, assignee)
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
@@ -579,6 +592,47 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// assigneeBlocksDispatch independently re-checks issueID's CURRENT assignee
+// via `bd show`, right before feedFirstReady would sling it. blocked is true
+// when the issue is assigned to any seat that is not a polecat (crew,
+// witness, refinery, mayor, deacon), or when the current assignee could not
+// be determined — a lookup that can't be verified is treated as blocking,
+// never as permission to dispatch (lesson 372). An empty or polecat assignee
+// is not blocked. (gt-azq)
+func (m *ConvoyManager) assigneeBlocksDispatch(issueID string) (assignee string, blocked bool) {
+	bdPath, err := exec.LookPath("bd")
+	if err != nil {
+		bdPath = "bd"
+	}
+
+	cmd := exec.CommandContext(m.ctx, bdPath, "show", issueID, "--json")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", true
+	}
+
+	var issues []struct {
+		Assignee string `json:"assignee"`
+	}
+	if jsonErr := json.Unmarshal(out, &issues); jsonErr != nil || len(issues) == 0 {
+		return "", true
+	}
+
+	assignee = issues[0].Assignee
+	if assignee == "" {
+		return "", false
+	}
+
+	identity, err := session.ParseAddress(assignee)
+	if err != nil || identity.Role != session.RolePolecat {
+		return assignee, true
+	}
+	return assignee, false
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose
