@@ -35,13 +35,18 @@ const (
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
 type strandedConvoyInfo struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	TrackedCount int       `json:"tracked_count"`
-	ReadyCount   int       `json:"ready_count"`
-	ReadyIssues  []string  `json:"ready_issues"`
-	CreatedAt    time.Time `json:"created_at"`
-	BaseBranch   string    `json:"base_branch,omitempty"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	TrackedCount int      `json:"tracked_count"`
+	ReadyCount   int      `json:"ready_count"`
+	ReadyIssues  []string `json:"ready_issues"`
+	// ReadyAssignees maps a ready issue ID to its assignee, when it has one
+	// (absent for unassigned issues or for a stranded response produced by a
+	// gt binary older than gt-azq). feedFirstReady uses it as a defense-in-
+	// depth backstop, independent of isReadyIssue's own seat-kind filtering.
+	ReadyAssignees map[string]string `json:"ready_assignees,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	BaseBranch     string            `json:"base_branch,omitempty"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -559,14 +564,14 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		// Defense in depth (gt-azq): re-verify the CURRENT assignee right
-		// before dispatch, independent of the seat-kind check isReadyIssue
-		// (internal/cmd/convoy.go) already applied when `gt convoy stranded`
-		// built c.ReadyIssues moments earlier. The convoy feeder must never
-		// sling a bead owned by a non-polecat seat (crew, witness, refinery,
-		// mayor, deacon) — whether because that check regresses, or because
-		// the assignee changed in the window between scan and dispatch.
-		if assignee, blocked := m.assigneeBlocksDispatch(issueID); blocked {
+		// Defense in depth (gt-azq): independently re-check the assignee
+		// using a code path separate from isReadyIssue's own seat-kind
+		// filtering (internal/cmd/convoy.go), so a regression in that
+		// predicate alone can't make this daemon sling a bead owned by a
+		// non-polecat seat (crew, witness, refinery, mayor, deacon). A
+		// missing entry (no assignee, or a stranded response from a gt
+		// binary older than gt-azq) is not blocking.
+		if assignee, blocked := nonPolecatSeatAssignee(c.ReadyAssignees[issueID]); blocked {
 			m.logger("Convoy %s: %s is assigned to non-polecat seat %q, refusing to sling", c.ID, issueID, assignee)
 			continue
 		}
@@ -594,40 +599,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
 }
 
-// assigneeBlocksDispatch independently re-checks issueID's CURRENT assignee
-// via `bd show`, right before feedFirstReady would sling it. blocked is true
-// when the issue is assigned to any seat that is not a polecat (crew,
-// witness, refinery, mayor, deacon), or when the current assignee could not
-// be determined — a lookup that can't be verified is treated as blocking,
-// never as permission to dispatch (lesson 372). An empty or polecat assignee
-// is not blocked. (gt-azq)
-func (m *ConvoyManager) assigneeBlocksDispatch(issueID string) (assignee string, blocked bool) {
-	bdPath, err := exec.LookPath("bd")
-	if err != nil {
-		bdPath = "bd"
-	}
-
-	cmd := exec.CommandContext(m.ctx, bdPath, "show", issueID, "--json")
-	cmd.Dir = m.townRoot
-	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", true
-	}
-
-	var issues []struct {
-		Assignee string `json:"assignee"`
-	}
-	if jsonErr := json.Unmarshal(out, &issues); jsonErr != nil || len(issues) == 0 {
-		return "", true
-	}
-
-	assignee = issues[0].Assignee
+// nonPolecatSeatAssignee reports whether assignee identifies a seat other
+// than a polecat (crew, witness, refinery, mayor, deacon). An empty assignee
+// (unassigned, or no information available) is never blocking. (gt-azq)
+func nonPolecatSeatAssignee(assignee string) (string, bool) {
 	if assignee == "" {
 		return "", false
 	}
-
 	identity, err := session.ParseAddress(assignee)
 	if err != nil || identity.Role != session.RolePolecat {
 		return assignee, true

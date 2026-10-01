@@ -1507,8 +1507,12 @@ type strandedConvoyInfo struct {
 	TrackedCount int      `json:"tracked_count"`
 	ReadyCount   int      `json:"ready_count"`
 	ReadyIssues  []string `json:"ready_issues"`
-	CreatedAt    string   `json:"created_at,omitempty"`
-	BaseBranch   string   `json:"base_branch,omitempty"`
+	// ReadyAssignees maps a ready issue ID to its assignee, when it has one.
+	// Lets a consumer (e.g. the daemon's feedFirstReady) independently
+	// re-verify the seat kind right before dispatch. (gt-azq)
+	ReadyAssignees map[string]string `json:"ready_assignees,omitempty"`
+	CreatedAt      string            `json:"created_at,omitempty"`
+	BaseBranch     string            `json:"base_branch,omitempty"`
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1651,6 +1655,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		scheduledSet := areScheduled(trackedIDs)
 
 		var readyIssues []string
+		readyAssignees := map[string]string{}
 		for _, t := range tracked {
 			if isReadyIssue(t, scheduledSet) {
 				if !isSlingableBead(townBeads, t.ID) {
@@ -1660,6 +1665,9 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 					continue
 				}
 				readyIssues = append(readyIssues, t.ID)
+				if t.Assignee != "" {
+					readyAssignees[t.ID] = t.Assignee
+				}
 			} else if seat := nonPolecatSeatDescription(t.Assignee); seat != "" {
 				// Make the stranded-but-unfeedable state visible to a human
 				// running `gt convoy stranded` directly. Written to stderr
@@ -1675,13 +1683,14 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 
 		if len(readyIssues) > 0 {
 			stranded = append(stranded, strandedConvoyInfo{
-				ID:           convoy.ID,
-				Title:        convoy.Title,
-				TrackedCount: len(tracked),
-				ReadyCount:   len(readyIssues),
-				ReadyIssues:  readyIssues,
-				CreatedAt:    convoy.CreatedAt,
-				BaseBranch:   baseBranch,
+				ID:             convoy.ID,
+				Title:          convoy.Title,
+				TrackedCount:   len(tracked),
+				ReadyCount:     len(readyIssues),
+				ReadyIssues:    readyIssues,
+				ReadyAssignees: readyAssignees,
+				CreatedAt:      convoy.CreatedAt,
+				BaseBranch:     baseBranch,
 			})
 		} else {
 			// Has tracked issues but none are ready — include in stranded
