@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
@@ -262,22 +263,161 @@ func TestPurgeOwnClosedWispsSkipsWhenReceiptCannotBeWritten(t *testing.T) {
 }
 
 // The database-wide path kept for polecat nuke must still be age-bounded.
+// gt-12f: it no longer delegates to `bd purge --older-than`, which has no
+// concept of a protected bead — the real delete is now the explicit, by-id
+// path, so the age bound is enforced here rather than by an --older-than flag.
 func TestPurgeClosedEphemeralBeadsIsAgeBounded(t *testing.T) {
 	townRootForEvents(t)
-	calls := recordingBD(t, "[]")
+	recentClosedAt := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+	oldClosedAt := time.Now().UTC().Add(-8 * 24 * time.Hour).Format(time.RFC3339)
+	wispJSON := fmt.Sprintf(`[
+	  {"id":"ccm-wisp-recent","title":"recent","status":"closed","ephemeral":true,"closed_at":%q},
+	  {"id":"ccm-wisp-old","title":"old","status":"closed","ephemeral":true,"closed_at":%q}
+	]`, recentClosedAt, oldClosedAt)
+	calls := recordingBD(t, wispJSON)
 
 	purgeClosedEphemeralBeads(beads.New(t.TempDir()), "ccm/witness", "ccm")
 
-	var purge string
+	var deletes []string
 	for _, c := range calls() {
-		if strings.Contains(c, "purge ") {
-			purge = c
+		if strings.Contains(c, "delete ") {
+			deletes = append(deletes, c)
 		}
 	}
-	if purge == "" {
-		t.Fatal("no purge call recorded")
+	if len(deletes) != 1 {
+		t.Fatalf("expected exactly one delete call, got %v", deletes)
 	}
-	if !strings.Contains(purge, "--older-than "+unscopedPurgeMinAge) {
-		t.Errorf("purge call %q is age-blind; want --older-than %s", purge, unscopedPurgeMinAge)
+	if !strings.Contains(deletes[0], "ccm-wisp-old") {
+		t.Errorf("delete call %q missing the wisp closed 8 days ago", deletes[0])
+	}
+	if strings.Contains(deletes[0], "ccm-wisp-recent") {
+		t.Errorf("delete call %q is age-blind; purged a wisp closed only 1h ago", deletes[0])
+	}
+}
+
+// gt-12f / cl-kf00: a merge-request-labelled bead and a compliance-commented
+// bead must never be purged by the database-wide path, no matter their age.
+func TestPurgeClosedEphemeralBeadsExcludesProtectedBeads(t *testing.T) {
+	townRootForEvents(t)
+	oldClosedAt := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	wispJSON := fmt.Sprintf(`[
+	  {"id":"ccm-wisp-mr","title":"Merge: ccm-abc","status":"closed","ephemeral":true,"labels":["gt:merge-request"],"closed_at":%q},
+	  {"id":"ccm-wisp-cc","title":"commented step","status":"closed","ephemeral":true,"comment_count":1,"closed_at":%q},
+	  {"id":"ccm-wisp-plain","title":"plain step","status":"closed","ephemeral":true,"closed_at":%q}
+	]`, oldClosedAt, oldClosedAt, oldClosedAt)
+	calls := recordingBDWithComments(t, wispJSON, map[string]string{
+		"ccm-wisp-cc": `[{"id":"c1","author":"cloudcontentmanager/crew/compliance","text":"verdict: NOT_TRIGGERED"}]`,
+	})
+
+	purgeClosedEphemeralBeads(beads.New(t.TempDir()), "ccm/witness", "ccm")
+
+	var deletes []string
+	for _, c := range calls() {
+		if strings.Contains(c, "delete ") {
+			deletes = append(deletes, c)
+		}
+	}
+	if len(deletes) != 1 {
+		t.Fatalf("expected exactly one delete call, got %v", deletes)
+	}
+	got := deletes[0]
+	if !strings.Contains(got, "ccm-wisp-plain") {
+		t.Errorf("delete call %q is missing the unprotected wisp", got)
+	}
+	for _, forbidden := range []string{"ccm-wisp-mr", "ccm-wisp-cc"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("delete call %q purged a protected bead %q — cl-kf00 requires it survive", got, forbidden)
+		}
+	}
+}
+
+// A candidate whose comments cannot be read must be withheld, not assumed safe.
+func TestPurgeClosedEphemeralBeadsFailsClosedWhenCommentsAreUnreadable(t *testing.T) {
+	townRootForEvents(t)
+	oldClosedAt := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	wispJSON := fmt.Sprintf(`[
+	  {"id":"ccm-wisp-unreadable","title":"commented step","status":"closed","ephemeral":true,"comment_count":1,"closed_at":%q}
+	]`, oldClosedAt)
+
+	binDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  query) cat <<'JSON'
+%s
+JSON
+  ;;
+  comments) echo "dolt: connection refused" >&2; exit 1 ;;
+  *) : ;;
+esac
+`, wispJSON)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// purgeClosedEphemeralBeads logs warnings, not deletes, when it keeps
+	// something — the real assertion is that no delete call reaches bd at all,
+	// which recordingBD-style argv logging isn't wired up for here, so this
+	// test calls planUnscopedPurge directly to check the exclusion count.
+	doomed, excluded, err := planUnscopedPurge(beads.New(t.TempDir()))
+	if err != nil {
+		t.Fatalf("planUnscopedPurge() = %v", err)
+	}
+	if len(doomed) != 0 {
+		t.Errorf("doomed = %v, want nothing purged when comments are unreadable", doomed)
+	}
+	if excluded.unreadable != 1 {
+		t.Errorf("excluded.unreadable = %d, want 1", excluded.unreadable)
+	}
+}
+
+// recordingBDWithComments is recordingBD plus a `bd comments <id> --json`
+// responder, keyed by id, for gt-12f's compliance-seat authorship check.
+func recordingBDWithComments(t *testing.T, queryJSON string, commentsByID map[string]string) func() []string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "argv.log")
+	dataPath := filepath.Join(binDir, "wisps.json")
+	commentsDir := filepath.Join(binDir, "comments")
+	if err := os.MkdirAll(commentsDir, 0755); err != nil {
+		t.Fatalf("mkdir comments dir: %v", err)
+	}
+	if err := os.WriteFile(dataPath, []byte(queryJSON), 0644); err != nil {
+		t.Fatalf("write fake wisp data: %v", err)
+	}
+	for id, commentsJSON := range commentsByID {
+		if err := os.WriteFile(filepath.Join(commentsDir, id+".json"), []byte(commentsJSON), 0644); err != nil {
+			t.Fatalf("write fake comments for %s: %v", id, err)
+		}
+	}
+
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1" in
+  query) cat %q ;;
+  comments)
+    f=%q/"$2".json
+    if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+    ;;
+  *) : ;;
+esac
+`, logPath, dataPath, commentsDir)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	return func() []string {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return nil // never invoked
+		}
+		var calls []string
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line != "" {
+				calls = append(calls, line)
+			}
+		}
+		return calls
 	}
 }
