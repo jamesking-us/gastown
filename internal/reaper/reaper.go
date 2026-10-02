@@ -585,6 +585,22 @@ func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dry
 	return result, nil
 }
 
+// protectedWispExclusionSQL excludes gt-12f/cl-kf00 protected beads from an
+// unconditional, age-based wisp purge: a bead labelled gt:merge-request, or
+// any bead carrying a comment from a compliance seat. Matched on the label
+// and on the comment author column — never on a marker string in title or
+// description text, which a rephrase can miss. If wisp_labels or
+// wisp_comments cannot be queried (e.g. missing on a not-yet-migrated
+// database), the surrounding SELECT errors and purgeClosedWisps aborts rather
+// than purging unprotected — failing closed, not open.
+const protectedWispExclusionSQL = ` AND w.id NOT IN (SELECT issue_id FROM wisp_labels WHERE label = 'gt:merge-request')
+  AND w.id NOT IN (
+    SELECT issue_id FROM wisp_comments
+    WHERE author IN ('crew/compliance', 'crew/compliance_b')
+       OR author LIKE '%/crew/compliance'
+       OR author LIKE '%/crew/compliance_b'
+  )`
+
 func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -593,10 +609,12 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	var anomalies []Anomaly
 
 	// Digest: count by wisp_type.
-	// No parent check — closed wisps past the delete age are unconditionally purgeable.
+	// No parent check — closed wisps past the delete age are unconditionally purgeable
+	// (apart from the protected-bead exclusion below).
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m)
 	// query cost with 1800+ closed wisps, leading to CPU spikes and timeouts (gt-wvd2).
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?" +
+		protectedWispExclusionSQL + " GROUP BY wtype"
 	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff)
 	if err != nil {
 		return 0, nil, fmt.Errorf("digest query: %w", err)
@@ -628,9 +646,11 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
-	// Batch delete — simple status+age filter, no parent check needed for purge.
+	// Batch delete — simple status+age filter plus the protected-bead
+	// exclusion above; no parent check needed for purge.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?"+
+			protectedWispExclusionSQL+" LIMIT %d",
 		DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 

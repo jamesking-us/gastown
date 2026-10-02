@@ -250,13 +250,13 @@ Examples:
 }
 
 var (
-	polecatStaleJSON      bool
-	polecatStaleThreshold int
-	polecatStaleCleanup   bool
-	polecatStaleDryRun    bool
+	polecatStaleJSON       bool
+	polecatStaleThreshold  int
+	polecatStaleCleanup    bool
+	polecatStaleDryRun     bool
 	polecatStalePurgeWisps bool
-	polecatPruneDryRun    bool
-	polecatPruneRemote    bool
+	polecatPruneDryRun     bool
+	polecatPruneRemote     bool
 )
 
 var polecatStaleCmd = &cobra.Command{

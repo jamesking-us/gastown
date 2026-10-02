@@ -226,16 +226,22 @@ func TestReapUpdateQueryNoDatabaseNameInjection(t *testing.T) {
 }
 
 // TestPurgeDigestQueryNoDatabaseNameInjection verifies that the purge digest
-// query is a plain string with no Sprintf interpolation at all.
+// query is a plain string (plus the fixed protected-bead exclusion clause)
+// with no dbName interpolation at all.
 func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
-	// The fixed digestQuery is a string literal — no Sprintf.
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
+	// The fixed digestQuery is a string literal — no dbName Sprintf.
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?" +
+		protectedWispExclusionSQL + " GROUP BY wtype"
 
-	if strings.Contains(digestQuery, "gt") {
-		t.Errorf("purge digestQuery should not contain database name, got: %s", digestQuery)
+	if strings.Contains(digestQuery, "`") {
+		t.Errorf("purge digestQuery should not contain a backtick-qualified (injectable) database name, got: %s", digestQuery)
 	}
 	if !strings.Contains(digestQuery, "GROUP BY wtype") {
 		t.Errorf("purge digestQuery should end with GROUP BY, got: %s", digestQuery)
+	}
+	// gt-12f: every purge query must carry the protected-bead exclusion.
+	if !strings.Contains(digestQuery, "wisp_labels") || !strings.Contains(digestQuery, "wisp_comments") {
+		t.Errorf("purge digestQuery is missing the gt-12f protected-bead exclusion, got: %s", digestQuery)
 	}
 }
 
@@ -244,15 +250,20 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
 	// This is the fixed query — only DefaultBatchSize in the Sprintf args.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?"+
+			protectedWispExclusionSQL+" LIMIT %d",
 		DefaultBatchSize)
 
-	if strings.Contains(idQuery, "gt") {
-		t.Errorf("purge idQuery contains injected database name: %s", idQuery)
+	if strings.Contains(idQuery, "`") {
+		t.Errorf("purge idQuery should not contain a backtick-qualified (injectable) database name: %s", idQuery)
 	}
 	expected := fmt.Sprintf("LIMIT %d", DefaultBatchSize)
 	if !strings.Contains(idQuery, expected) {
 		t.Errorf("purge idQuery should contain %s, got: %s", expected, idQuery)
+	}
+	// gt-12f: every purge query must carry the protected-bead exclusion.
+	if !strings.Contains(idQuery, "wisp_labels") || !strings.Contains(idQuery, "wisp_comments") {
+		t.Errorf("purge idQuery is missing the gt-12f protected-bead exclusion, got: %s", idQuery)
 	}
 }
 

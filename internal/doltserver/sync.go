@@ -678,7 +678,7 @@ func runBDPurge(env []string, workDir, dbName string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json", "--force"})
+	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = workDir
 	cmd.Env = env
