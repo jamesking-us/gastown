@@ -143,6 +143,7 @@ var (
 	polecatNukeAll                       bool
 	polecatNukeDryRun                    bool
 	polecatNukeForce                     bool
+	polecatNukePurgeWisps                bool
 	polecatCheckRecoveryJSON             bool
 	polecatCheckRecoveryReconcileCleanup bool
 	polecatPoolInitDryRun                bool
@@ -189,12 +190,21 @@ SAFETY CHECKS: The command refuses to nuke a polecat if:
 Use --force to bypass safety checks (LOSES WORK).
 Use --dry-run to see what would happen and safety check status.
 
+By default, nuke touches only the target polecat(s): session, worktree,
+branch, and agent bead. It does NOT purge closed ephemeral wisps from the rig
+database (gt-12f: that purge used to run unconditionally and could destroy
+merge-request beads carrying compliance verdicts). Pass --purge-closed-wisps
+to opt into the database-wide purge; it still excludes beads labelled
+gt:merge-request and any bead with a comment from a compliance seat, and
+--dry-run shows exactly what it would remove before you run it for real.
+
 Examples:
   gt polecat nuke greenplace/Toast
   gt polecat nuke greenplace/Toast greenplace/Furiosa
   gt polecat nuke greenplace --all
   gt polecat nuke greenplace --all --dry-run
-  gt polecat nuke greenplace/Toast --force  # bypass safety checks`,
+  gt polecat nuke greenplace/Toast --force  # bypass safety checks
+  gt polecat nuke greenplace/Toast --purge-closed-wisps  # also purge old closed wisps`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPolecatNuke,
 }
@@ -244,6 +254,7 @@ var (
 	polecatStaleThreshold int
 	polecatStaleCleanup   bool
 	polecatStaleDryRun    bool
+	polecatStalePurgeWisps bool
 	polecatPruneDryRun    bool
 	polecatPruneRemote    bool
 )
@@ -347,6 +358,7 @@ func init() {
 	polecatNukeCmd.Flags().BoolVar(&polecatNukeAll, "all", false, "Nuke all polecats in the rig")
 	polecatNukeCmd.Flags().BoolVar(&polecatNukeDryRun, "dry-run", false, "Show what would be nuked without doing it")
 	polecatNukeCmd.Flags().BoolVarP(&polecatNukeForce, "force", "f", false, "Force nuke, bypassing all safety checks (LOSES WORK)")
+	polecatNukeCmd.Flags().BoolVar(&polecatNukePurgeWisps, "purge-closed-wisps", false, "Also purge closed ephemeral wisps older than 7d, database-wide (off by default — gt-12f; excludes merge-request and compliance-commented beads, and still shows under --dry-run)")
 
 	// Check-recovery flags
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryJSON, "json", false, "Output as JSON")
@@ -357,6 +369,7 @@ func init() {
 	polecatStaleCmd.Flags().IntVar(&polecatStaleThreshold, "threshold", 20, "Commits behind main to consider stale")
 	polecatStaleCmd.Flags().BoolVar(&polecatStaleCleanup, "cleanup", false, "Automatically nuke stale polecats")
 	polecatStaleCmd.Flags().BoolVar(&polecatStaleDryRun, "dry-run", false, "Show what would be cleaned without doing it")
+	polecatStaleCmd.Flags().BoolVar(&polecatStalePurgeWisps, "purge-closed-wisps", false, "With --cleanup, also purge closed ephemeral wisps older than 7d, database-wide (off by default — gt-12f; excludes merge-request and compliance-commented beads)")
 
 	// Prune flags
 	polecatPruneCmd.Flags().BoolVar(&polecatPruneDryRun, "dry-run", false, "Show what would be pruned without doing it")
@@ -2088,6 +2101,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	batchPurge := !polecatNukeDryRun && len(targets) > 1
 	purgeRigs := make(map[string]*rig.Rig)
 	dryRunBlocked := 0
+	dryRunPurgePreviewed := make(map[string]bool)
 
 	for _, p := range targets {
 		if polecatNukeDryRun {
@@ -2106,6 +2120,15 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			if displayDryRunSafetyCheck(p) && !blocked {
 				dryRunBlocked++
 			}
+
+			// gt-12f: the database-wide wisp purge must be discoverable under
+			// --dry-run, not just as a side effect of the real run. One preview
+			// per rig — the purge is rig-wide, not per-polecat.
+			if !dryRunPurgePreviewed[p.r.Path] {
+				dryRunPurgePreviewed[p.r.Path] = true
+				displayDryRunWispPurge(p.r)
+			}
+
 			fmt.Println()
 			continue
 		}
@@ -2116,17 +2139,17 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Nuking %s/%s...\n", p.rigName, p.polecatName)
 		}
 
-		if err := nukePolecatFullWithOptions(p.polecatName, p.rigName, p.mgr, p.r, nukePolecatOptions{Force: polecatNukeForce, PurgeClosedEphemerals: !batchPurge}); err != nil {
+		if err := nukePolecatFullWithOptions(p.polecatName, p.rigName, p.mgr, p.r, nukePolecatOptions{Force: polecatNukeForce, PurgeClosedEphemerals: polecatNukePurgeWisps && !batchPurge}); err != nil {
 			nukeErrors = append(nukeErrors, fmt.Sprintf("%s/%s: %v", p.rigName, p.polecatName, err))
 			continue
 		}
 
 		nuked++
-		if batchPurge {
+		if polecatNukePurgeWisps && batchPurge {
 			purgeRigs[p.r.Path] = p.r
 		}
 	}
-	if batchPurge && len(purgeRigs) > 0 {
+	if polecatNukePurgeWisps && batchPurge && len(purgeRigs) > 0 {
 		for _, r := range purgeRigs {
 			purgeClosedEphemeralBeads(beads.New(r.Path), detectSender(), r.Name)
 		}
@@ -2164,6 +2187,39 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// displayDryRunWispPurge prints the database-wide wisp purge preview for a
+// rig under `gt polecat nuke --dry-run`. Without --purge-closed-wisps, nuke
+// never touches the rig's wisps at all, and says so rather than staying
+// silent about a destructive action an operator might assume still happens.
+func displayDryRunWispPurge(r *rig.Rig) {
+	if !polecatNukePurgeWisps {
+		fmt.Printf("  - Wisp purge: skipped (pass --purge-closed-wisps to also purge closed wisps older than %s)\n", unscopedPurgeMinAge)
+		return
+	}
+	doomed, excluded, err := planUnscopedPurge(beads.New(r.Path))
+	if err != nil {
+		fmt.Printf("  - Wisp purge: %s could not list candidates: %v\n", style.Warning.Render("⚠"), err)
+		return
+	}
+	fmt.Printf("  - Wisp purge (--purge-closed-wisps, database-wide, older than %s): %d wisp(s)\n", unscopedPurgeMinAge, len(doomed))
+	for _, w := range doomed {
+		title := w.Title
+		if title == "" {
+			title = "(no title)"
+		}
+		fmt.Printf("      %s %s\n", w.ID, title)
+	}
+	if excluded.mergeRequest > 0 {
+		fmt.Printf("      %s kept %d merge-request bead(s)\n", style.Dim.Render("○"), excluded.mergeRequest)
+	}
+	if excluded.compliance > 0 {
+		fmt.Printf("      %s kept %d compliance-commented bead(s)\n", style.Dim.Render("○"), excluded.compliance)
+	}
+	if excluded.unreadable > 0 {
+		fmt.Printf("      %s kept %d bead(s) with unreadable comments (failed closed)\n", style.Dim.Render("○"), excluded.unreadable)
+	}
 }
 
 func dryRunNukeSummary(total, blocked int) string {
@@ -2500,13 +2556,13 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 					continue
 				}
 				fmt.Printf("Nuking %s...\n", info.Name)
-				if err := nukePolecatFullWithOptions(info.Name, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: !batchPurge}); err != nil {
+				if err := nukePolecatFullWithOptions(info.Name, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: polecatStalePurgeWisps && !batchPurge}); err != nil {
 					fmt.Printf("  %s (%v)\n", style.Error.Render("failed"), err)
 				} else {
 					nuked++
 				}
 			}
-			if batchPurge && nuked > 0 {
+			if polecatStalePurgeWisps && batchPurge && nuked > 0 {
 				purgeClosedEphemeralBeads(beads.New(r.Path), detectSender(), r.Name)
 			}
 			fmt.Printf("\n%s Nuked %d stale polecat(s).\n", style.SuccessPrefix, nuked)
