@@ -85,7 +85,7 @@ func CommentsProtectedCount(raw []byte) (protected, readable bool, count int) {
 	raw = bytes.TrimSpace(raw)
 	start := bytes.IndexByte(raw, '[')
 	if start < 0 {
-		return false, false
+		return false, false, 0
 	}
 	raw = raw[start:]
 	var comments []struct {
