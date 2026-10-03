@@ -493,6 +493,32 @@ esac
 	}
 }
 
+func TestDeleteWispFailsClosedOnCommentCountMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  comments) echo '[]' ;;
+  delete) echo "deleteWisp must not delete on comment count mismatch" >&2; exit 1 ;;
+  *) echo "unexpected bd invocation: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bd := beads.New(t.TempDir())
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-mismatch", Title: "mystery"}, CommentCount: 1}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})
+	if len(result.Deleted) != 0 || result.Skipped != 1 {
+		t.Fatalf("Deleted=%#v Skipped=%d, want the mismatched candidate retained", result.Deleted, result.Skipped)
+	}
+}
+
 func TestDeleteWispDeletesUnprotectedWisp(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script command stubs not supported on Windows")

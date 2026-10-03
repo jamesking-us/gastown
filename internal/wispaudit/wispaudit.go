@@ -68,6 +68,7 @@ const (
 const (
 	phasePlanned   = "planned"
 	phaseCompleted = "completed"
+	phasePartial   = "partial"
 )
 
 // Wisp is one wisp in a deletion record: enough to know what was lost.
@@ -125,6 +126,17 @@ func Plan(actor, path, scope, db string, wisps []Wisp, extra map[string]interfac
 // for callers that want to mention it; nothing should abort on it.
 func Completed(actor, path, scope, db string, wisps []Wisp, failures []string, extra map[string]interface{}) error {
 	payload := events.WispPurgePayload(phaseCompleted, path, scope, db, wispPayload(wisps), extra)
+	if len(failures) > 0 {
+		payload["failed"] = failures
+	}
+	return events.LogAudit(events.TypeWispPurge, actor, payload)
+}
+
+// Partial records an attempted purge whose outcome could not be fully verified.
+// It must not be represented as completed: survivors and verifier failures are
+// evidence that the planned set did not necessarily go away.
+func Partial(actor, path, scope, db string, wisps []Wisp, failures []string, extra map[string]interface{}) error {
+	payload := events.WispPurgePayload(phasePartial, path, scope, db, wispPayload(wisps), extra)
 	if len(failures) > 0 {
 		payload["failed"] = failures
 	}

@@ -71,10 +71,10 @@ func init() {
 
 // PatrolDigest represents the aggregated daily patrol report.
 type PatrolDigest struct {
-	Date         string                   `json:"date"`
-	TotalCycles  int                      `json:"total_cycles"`
-	ByRole       map[string]int           `json:"by_role"`        // deacon, witness, refinery
-	Cycles       []PatrolCycleEntry       `json:"cycles"`
+	Date        string             `json:"date"`
+	TotalCycles int                `json:"total_cycles"`
+	ByRole      map[string]int     `json:"by_role"` // deacon, witness, refinery
+	Cycles      []PatrolCycleEntry `json:"cycles"`
 }
 
 // PatrolCycleEntry represents a single patrol cycle in the digest.
@@ -402,7 +402,8 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 				kept++
 				continue // unreadable: fail closed, keep it
 			}
-			if protected, readable := wispaudit.CommentsProtected(out); !readable || protected {
+			protected, readable, count := wispaudit.CommentsProtectedCount(out)
+			if !readable || count != cycle.CommentCount || protected {
 				kept++
 				continue
 			}

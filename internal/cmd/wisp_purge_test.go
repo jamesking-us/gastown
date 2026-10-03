@@ -295,6 +295,21 @@ func TestPurgeClosedEphemeralBeadsIsAgeBounded(t *testing.T) {
 	}
 }
 
+// A malformed or absent closure time cannot satisfy the mandatory age floor.
+// Treating it as old was an implicit ageless purge hiding behind parse failure.
+func TestPurgeClosedEphemeralBeadsKeepsUnknownAge(t *testing.T) {
+	townRootForEvents(t)
+	wispJSON := `[{"id":"ccm-wisp-unknown-age","title":"unknown","status":"closed","ephemeral":true,"closed_at":"not-a-time"}]`
+	calls := recordingBD(t, wispJSON)
+
+	purgeClosedEphemeralBeads(beads.New(t.TempDir()), "ccm/witness", "ccm")
+	for _, c := range calls() {
+		if strings.Contains(c, "delete ") {
+			t.Errorf("deleted %q despite an unknown closed_at", c)
+		}
+	}
+}
+
 // gt-12f / cl-kf00: a merge-request-labelled bead and a compliance-commented
 // bead must never be purged by the database-wide path, no matter their age.
 func TestPurgeClosedEphemeralBeadsExcludesProtectedBeads(t *testing.T) {

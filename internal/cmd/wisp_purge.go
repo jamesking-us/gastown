@@ -280,7 +280,15 @@ func planUnscopedPurge(bd *beads.Beads) ([]wispaudit.Wisp, purgeExclusion, error
 		if w.Status != "closed" {
 			continue
 		}
-		if closedAt, ok := wispClosedAt(w); ok && closedAt.After(cutoff) {
+		closedAt, ok := wispClosedAt(w)
+		if !ok {
+			// An absent or malformed closure time is not evidence that this row
+			// cleared the mandatory seven-day floor. Keep it rather than silently
+			// turning an unparseable value into "old".
+			excluded.unreadable++
+			continue
+		}
+		if closedAt.After(cutoff) {
 			continue
 		}
 		if wispaudit.HasProtectedLabel(w.Labels) {
@@ -288,7 +296,7 @@ func planUnscopedPurge(bd *beads.Beads) ([]wispaudit.Wisp, purgeExclusion, error
 			continue
 		}
 		if w.CommentCount > 0 {
-			protected, readable := commentsAreProtected(bd, w.ID)
+			protected, readable := commentsAreProtected(bd, w.ID, w.CommentCount)
 			if !readable {
 				excluded.unreadable++
 				continue
@@ -306,9 +314,12 @@ func planUnscopedPurge(bd *beads.Beads) ([]wispaudit.Wisp, purgeExclusion, error
 // commentsAreProtected reports whether id carries a comment from a compliance
 // seat, and whether its comments could be read at all. Callers must treat
 // readable=false as "do not purge" (fail closed), not as "not protected".
-func commentsAreProtected(bd *beads.Beads, id string) (protected, readable bool) {
+func commentsAreProtected(bd *beads.Beads, id string, expectedCount int) (protected, readable bool) {
 	comments, err := bd.Comments(id)
 	if err != nil {
+		return false, false
+	}
+	if len(comments) != expectedCount {
 		return false, false
 	}
 	authors := make([]string, 0, len(comments))
@@ -319,9 +330,8 @@ func commentsAreProtected(bd *beads.Beads, id string) (protected, readable bool)
 }
 
 // wispClosedAt reports when a wisp was closed, falling back to its last update
-// when bd omits closed_at. A wisp whose timestamp will not parse reports false,
-// and the caller then treats it as old enough — matching bd, which is the thing
-// actually deciding.
+// when bd omits closed_at. A wisp whose timestamp will not parse reports false;
+// purge planning treats that as unknown and keeps it, preserving the age floor.
 func wispClosedAt(w *purgeCandidate) (time.Time, bool) {
 	ts := w.ClosedAt
 	if ts == "" {

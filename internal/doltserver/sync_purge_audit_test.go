@@ -53,7 +53,8 @@ func fakeBD(t *testing.T, queryJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *query*) cat %q ;;
-  *purge*) echo '{"purged_count": 2}' ;;
+  *delete*) : ;;
+  *show*) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath)
@@ -78,8 +79,8 @@ esac
 }
 
 const gcWispJSON = `[
-  {"id":"cl-wisp-aaa","title":"mol-polecat-work step 1","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-bbb","title":"mol-polecat-work step 2","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-aaa","title":"mol-polecat-work step 1","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
+  {"id":"cl-wisp-bbb","title":"mol-polecat-work step 2","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
   {"id":"cl-wisp-live","title":"still working","status":"open","ephemeral":true}
 ]`
 
@@ -92,17 +93,17 @@ func TestPurgeClosedEphemeralsRecordsWhatItWillRemove(t *testing.T) {
 		t.Fatalf("PurgeClosedEphemerals() = %v", err)
 	}
 	if purged != 2 {
-		t.Fatalf("purged = %d, want the count bd reported", purged)
+		t.Fatalf("purged = %d, want the explicitly deleted count", purged)
 	}
 
-	var sawPurge bool
+	var sawDelete bool
 	for _, c := range calls() {
-		if strings.Contains(c, "purge") {
-			sawPurge = true
+		if strings.Contains(c, "delete") {
+			sawDelete = true
 		}
 	}
-	if !sawPurge {
-		t.Fatal("no bd purge was issued")
+	if !sawDelete {
+		t.Fatal("no explicit bd delete was issued")
 	}
 
 	planned := gcPlannedRecord(t, eventsPath)
@@ -116,7 +117,7 @@ func TestPurgeClosedEphemeralsRecordsWhatItWillRemove(t *testing.T) {
 		t.Errorf("db = %v, want ccm", planned["db"])
 	}
 	if planned["predicted"] != true {
-		t.Error("the record must say it is a prediction: bd applies its own definition of closed-ephemeral")
+		t.Error("the record must say it is a prediction")
 	}
 	named := fmt.Sprint(planned["wisps"])
 	for _, want := range []string{"cl-wisp-aaa", "mol-polecat-work step 1", "cl-wisp-bbb"} {
@@ -147,7 +148,7 @@ func TestPurgeClosedEphemeralsDoesNotPurgeWhenItCannotRecord(t *testing.T) {
 		t.Errorf("error = %v, want it to name the unwritable record", err)
 	}
 	for _, c := range calls() {
-		if strings.Contains(c, "purge") {
+		if strings.Contains(c, "delete") {
 			t.Errorf("ran %q with no durable record of what went", c)
 		}
 	}
@@ -197,7 +198,7 @@ func failingQueryBD(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *query*) echo 'dolt: connection refused' >&2; exit 1 ;;
-  *purge*) echo '{"purged_count": 99}' ;;
+  *delete*) echo 'unexpected delete' >&2; exit 1 ;;
   *) : ;;
 esac
 `
@@ -216,7 +217,7 @@ func TestPurgeClosedEphemeralsAbortsWhenListingFails(t *testing.T) {
 		t.Fatal("PurgeClosedEphemerals() = nil, want an error: a listing failure must abort the purge")
 	}
 	if purged != 0 {
-		t.Errorf("purged = %d, want 0 — bd's blanket purge (which reported 99) must never run when the candidate list could not be read", purged)
+		t.Errorf("purged = %d, want 0 — no delete may run when the candidate list could not be read", purged)
 	}
 	if _, statErr := os.Stat(eventsPath); statErr == nil {
 		t.Error("a purge that never ran must not leave a planned or completed record")
@@ -234,7 +235,7 @@ func TestPurgeClosedEphemeralsConfirmedEmptyIsNotAnError(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *query*) echo 'No issues found.' ;;
-  *purge*) echo '{"purged_count": 0}' ;;
+  *delete*) echo 'unexpected delete' >&2; exit 1 ;;
   *) : ;;
 esac
 `
@@ -266,7 +267,7 @@ func survivorBD(t *testing.T, queryJSON string) {
 	script := fmt.Sprintf(`#!/bin/sh
 case "$*" in
   *query*) cat %q ;;
-  *purge*) echo '{"purged_count": 2}' ;;
+  *delete*) : ;;
   *show*) echo '[{"id":"cl-wisp-aaa"}]' ;;
   *) : ;;
 esac
@@ -286,12 +287,12 @@ func TestPurgeClosedEphemeralsFlagsASurvivor(t *testing.T) {
 		t.Fatalf("PurgeClosedEphemerals() = %v", err)
 	}
 	if purged != 2 {
-		t.Fatalf("purged = %d, want the count bd reported (the survivor is flagged, not treated as a hard failure)", purged)
+		t.Fatalf("purged = %d, want the explicit delete count (the survivor is flagged, not treated as a hard failure)", purged)
 	}
 
-	completed := gcRecordWithPhase(t, eventsPath, "completed")
+	completed := gcRecordWithPhase(t, eventsPath, "partial")
 	if completed == nil {
-		t.Fatal("no completed record")
+		t.Fatal("no partial record")
 	}
 	survived := fmt.Sprint(completed["survived_purge"])
 	if !strings.Contains(survived, "cl-wisp-aaa") {
@@ -314,7 +315,7 @@ func failingBD(t *testing.T, queryJSON string) {
 	script := fmt.Sprintf(`#!/bin/sh
 case "$*" in
   *query*) cat %q ;;
-  *purge*) echo 'dolt: connection refused' >&2; exit 1 ;;
+  *delete*) echo 'dolt: connection refused' >&2; exit 1 ;;
   *) : ;;
 esac
 `, dataPath)

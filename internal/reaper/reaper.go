@@ -573,6 +573,10 @@ func closeWispsInBatches(ctx context.Context, runner sqlRunner, idQuery string, 
 
 // Purge deletes old closed wisps and mail from a database.
 func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
+	const minimumWispPurgeAge = 7 * 24 * time.Hour
+	if purgeAge < minimumWispPurgeAge {
+		return nil, fmt.Errorf("purge age %s is below the mandatory minimum %s", purgeAge, minimumWispPurgeAge)
+	}
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.

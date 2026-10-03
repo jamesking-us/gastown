@@ -559,8 +559,8 @@ func protectedFromDeletion(bd *beads.Beads, w *compactIssue) (protected bool, re
 	if err != nil {
 		return true, "comments unreadable"
 	}
-	isProtected, readable := wispaudit.CommentsProtected(out)
-	if !readable {
+	isProtected, readable, count := wispaudit.CommentsProtectedCount(out)
+	if !readable || count != w.CommentCount {
 		return true, "comments unreadable"
 	}
 	if isProtected {

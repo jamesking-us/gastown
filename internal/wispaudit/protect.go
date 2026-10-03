@@ -73,6 +73,15 @@ func AnyComplianceSeatAuthor(authors []string) bool {
 // prior version of this check treated any non-array output as "no comments",
 // which let an actually-unreadable candidate through as unprotected).
 func CommentsProtected(raw []byte) (protected, readable bool) {
+	protected, readable, _ = CommentsProtectedCount(raw)
+	return protected, readable
+}
+
+// CommentsProtectedCount is CommentsProtected with the number of decoded
+// comments. Callers with a comment_count from a candidate listing must compare
+// it: an empty or truncated comment response is unreadable when it contradicts
+// that count, even if it is syntactically valid JSON.
+func CommentsProtectedCount(raw []byte) (protected, readable bool, count int) {
 	raw = bytes.TrimSpace(raw)
 	start := bytes.IndexByte(raw, '[')
 	if start < 0 {
@@ -83,12 +92,12 @@ func CommentsProtected(raw []byte) (protected, readable bool) {
 		Author string `json:"author"`
 	}
 	if err := json.Unmarshal(raw, &comments); err != nil {
-		return false, false
+		return false, false, 0
 	}
 	for _, c := range comments {
 		if IsComplianceSeatAuthor(c.Author) {
-			return true, true
+			return true, true, len(comments)
 		}
 	}
-	return false, true
+	return false, true, len(comments)
 }

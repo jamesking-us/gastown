@@ -601,18 +601,10 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 		return 0, nil // no beads dir, or not initialized — nothing to purge
 	}
 
-	// bd purge reports a count and never the ids it removed, so the set is
-	// enumerated here instead and recorded before the purge runs. It is also
-	// how gt-12f's protected-bead exclusion is applied: `bd purge` has no
-	// concept of a protected bead (it only protects pinned rows), so a
-	// merge-request bead or a compliance-commented bead must be identified and
-	// withheld here, before bd ever runs.
-	//
-	// A listing failure must abort the purge rather than fall through to bd's
-	// own blanket definition (gt-12f round 2): an empty exclusion set because
-	// the list could not be read is indistinguishable, at the isZero() check
-	// below, from an empty exclusion set because nothing protected exists — and
-	// only the second one is safe to hand to bd's unconditional purge.
+	// Enumerate and filter the set before deleting. `bd purge` has no protected
+	// bead or age-floor semantics, so it must never be used here: a complete
+	// listing is still only a snapshot and a blanket purge can delete a row
+	// closed after that snapshot.
 	doomed, excluded, err := planClosedEphemeralPurge(env, workDir)
 	if err != nil {
 		return 0, fmt.Errorf("skipping purge for %s: could not list closed ephemerals first: %w", dbName, err)
@@ -622,24 +614,20 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 		return len(doomed), nil
 	}
 
+	// Re-plan immediately before deletion. This is deliberately a second
+	// complete read, rather than trusting the earlier preview: every id handed
+	// to bd delete has just passed the age and protection checks.
+	doomed, excluded, err = planClosedEphemeralPurge(env, workDir)
+	if err != nil {
+		return 0, fmt.Errorf("skipping purge for %s: could not re-check candidates before delete: %w", dbName, err)
+	}
 	extra := map[string]interface{}{"predicted": true}
 	excluded.asExtra(extra)
 	if err := wispaudit.Plan(wispaudit.Actor("gt"), path, "database", dbName, doomed, extra); err != nil {
 		return 0, fmt.Errorf("skipping purge for %s: the deletion could not be recorded first: %w", dbName, err)
 	}
-
 	var purgedCount int
-	if excluded.isZero() {
-		// Fast path: nothing protected is sitting in this database right now,
-		// so bd's own blanket purge is exactly as safe as the explicit delete
-		// below and far cheaper for the common case.
-		purgedCount, err = runBDPurge(env, workDir, dbName)
-	} else {
-		// A protected bead exists among the closed ephemerals. bd purge has no
-		// way to exclude it, so the real delete runs only against the filtered
-		// id list instead of bd's own blanket definition.
-		purgedCount, err = deleteWispsByID(env, workDir, dbName, doomed)
-	}
+	purgedCount, err = deleteWispsByID(env, workDir, dbName, doomed)
 	if err != nil {
 		return 0, err
 	}
@@ -666,64 +654,20 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 			failures = append(failures, id+": still present after purge")
 		}
 	}
-	_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, failures, extra)
+	// Completed names only rows that the post-delete read proved absent. A
+	// verification error or survivor is a partial outcome, never a completed
+	// purge record for work that may still be present.
+	if len(failures) > 0 || extra["verify_error"] != nil {
+		_ = wispaudit.Partial(wispaudit.Actor("gt"), path, "database", dbName, doomed, failures, extra)
+	} else {
+		_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, nil, extra)
+	}
 
 	return purgedCount, nil
 }
 
-// runBDPurge runs bd's own blanket purge (no --older-than: this GC removes any
-// closed ephemeral bead, not just old ones) and parses its reported count. Only
-// safe to call when planClosedEphemeralPurge found nothing protected to exclude.
-func runBDPurge(env []string, workDir, dbName string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
-	cmd := exec.CommandContext(ctx, "bd", args...)
-	cmd.Dir = workDir
-	cmd.Env = env
-	setProcessGroup(cmd)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return 0, fmt.Errorf("bd purge for %s: timed out after 60s", dbName)
-	}
-	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = strings.TrimSpace(stdout.String())
-		}
-		return 0, fmt.Errorf("bd purge for %s: %w (%s)", dbName, err, errMsg)
-	}
-
-	// Parse JSON output (from stdout only) to get purged count.
-	// bd may emit non-JSON warning lines before the JSON object,
-	// so extract the first JSON object from stdout.
-	jsonBytes := extractJSON(stdout.Bytes())
-	var result struct {
-		PurgedCount *int `json:"purged_count"`
-	}
-	if err := json.Unmarshal(jsonBytes, &result); err != nil {
-		return 0, fmt.Errorf("bd purge for %s: unexpected output format: %s", dbName, strings.TrimSpace(stdout.String()))
-	}
-
-	// Warn if purged_count field was missing from the JSON response — may indicate
-	// a schema mismatch (e.g., field renamed). An explicit 0 is a valid success case.
-	if result.PurgedCount == nil {
-		fmt.Fprintf(os.Stderr, "Warning: bd purge for %s: purged_count field missing (raw: %s)\n", dbName, strings.TrimSpace(stdout.String()))
-		return 0, nil
-	}
-	return *result.PurgedCount, nil
-}
-
-// deleteWispsByID deletes exactly the given wisps by id, in batches, instead
-// of bd's blanket purge. Used only when the predicted set excludes a
-// protected bead, so bd's own "closed ephemeral" definition — which has no
-// notion of a protected bead — never runs against this database.
+// deleteWispsByID deletes exactly the re-checked wisps by id, in batches. A
+// database-wide bd purge is deliberately not an alternative.
 func deleteWispsByID(env []string, workDir, dbName string, wisps []wispaudit.Wisp) (int, error) {
 	const batchSize = 100
 	deleted := 0
@@ -892,6 +836,7 @@ type closedEphemeralCandidate struct {
 	Status       string   `json:"status"`
 	Labels       []string `json:"labels,omitempty"`
 	CommentCount int      `json:"comment_count"`
+	ClosedAt     string   `json:"closed_at"`
 }
 
 // purgeExclusion counts candidates withheld from this GC purge, by reason.
@@ -953,12 +898,17 @@ func planClosedEphemeralPurge(env []string, workDir string) ([]wispaudit.Wisp, p
 		if w.Status != "closed" {
 			continue
 		}
+		closedAt, ok := closedEphemeralClosedAt(w)
+		if !ok || closedAt.After(time.Now().UTC().Add(-7*24*time.Hour)) {
+			excluded.unreadable++
+			continue
+		}
 		if wispaudit.HasProtectedLabel(w.Labels) {
 			excluded.mergeRequest++
 			continue
 		}
 		if w.CommentCount > 0 {
-			protected, readable := wispCommentsAreProtected(env, workDir, w.ID)
+			protected, readable := wispCommentsAreProtected(env, workDir, w.ID, w.CommentCount)
 			if !readable {
 				excluded.unreadable++
 				continue
@@ -1028,7 +978,7 @@ func listClosedEphemerals(env []string, workDir string) ([]closedEphemeralCandid
 // wispCommentsAreProtected reports whether id carries a comment from a
 // compliance seat, and whether its comments could be read at all. Callers
 // must treat readable=false as "do not purge", never as "not protected".
-func wispCommentsAreProtected(env []string, workDir, id string) (protected, readable bool) {
+func wispCommentsAreProtected(env []string, workDir, id string, expectedCount int) (protected, readable bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1043,7 +993,17 @@ func wispCommentsAreProtected(env []string, workDir, id string) (protected, read
 		return false, false
 	}
 
-	return wispaudit.CommentsProtected(stdout.Bytes())
+	protected, readable, count := wispaudit.CommentsProtectedCount(stdout.Bytes())
+	return protected, readable && count == expectedCount
+}
+
+func closedEphemeralClosedAt(w closedEphemeralCandidate) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z"} {
+		if t, err := time.Parse(layout, w.ClosedAt); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // extractJSONArray finds the first '[' in raw output that may carry a non-JSON
