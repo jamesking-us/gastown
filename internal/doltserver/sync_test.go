@@ -180,7 +180,7 @@ if [ "$1" = "--allow-stale" ] && [ "$2" = "query" ]; then
   printf '[{"id":"gt-wisp-a","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},{"id":"gt-wisp-b","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},{"id":"gt-wisp-c","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"}]\n'
   exit 0
 fi
-if [ "$1" = "--allow-stale" ] && [ "$2" = "delete" ]; then
+if [ "$1" = "delete" ]; then
   exit 0
 fi
 if [ "$1" = "show" ]; then
@@ -220,7 +220,7 @@ exit 2
 	log := string(data)
 	for _, want := range []string{
 		"args=--allow-stale version",
-		"args=--allow-stale delete --force gt-wisp-a gt-wisp-b gt-wisp-c",
+		"args=delete --force gt-wisp-a gt-wisp-b gt-wisp-c",
 		"BEADS_DIR=" + beadsDir,
 		"BEADS_DOLT_SERVER_DATABASE=gastown",
 		"BEADS_DOLT_SERVER_HOST=127.0.0.2",
