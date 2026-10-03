@@ -1,6 +1,9 @@
 package wispaudit
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsComplianceSeatAuthor(t *testing.T) {
 	cases := []struct {
@@ -51,6 +54,20 @@ func TestAnyComplianceSeatAuthor(t *testing.T) {
 	}
 	if !AnyComplianceSeatAuthor([]string{"mayor", "cloudcontentmanager/crew/compliance"}) {
 		t.Error("expected compliance seat author to be found")
+	}
+}
+
+func TestComplianceMailPolicyGeneratesGoAndSQLFormsFromSameSeats(t *testing.T) {
+	for _, labels := range [][]string{{"from:crew/compliance"}, {"from:gastown/crew/compliance_b"}} {
+		if !HasComplianceMailAuthorLabel(labels) {
+			t.Fatalf("labels %v were not protected by Go policy", labels)
+		}
+	}
+	sql := ComplianceMailLabelSQL("label")
+	for _, want := range []string{"from:crew/compliance", "from:crew/compliance_b", "LIKE 'from:%/crew/compliance'"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("generated SQL %q missing %q", sql, want)
+		}
 	}
 }
 

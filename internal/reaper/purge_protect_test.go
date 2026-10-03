@@ -25,10 +25,12 @@ func TestPurgeExcludesProtectedBeads(t *testing.T) {
 		wisps: map[string]string{
 			"cl-wisp-mr":    "Merge: cl-abc",
 			"cl-wisp-cc":    "mol-witness-patrol step 3",
+			"cl-wisp-mail":  "compliance mail wisp",
 			"cl-wisp-plain": "mol-polecat-work step 1",
 		},
-		labelled:   map[string]bool{"cl-wisp-mr": true},
-		compliance: map[string]bool{"cl-wisp-cc": true},
+		labelled:       map[string]bool{"cl-wisp-mr": true},
+		compliance:     map[string]bool{"cl-wisp-cc": true},
+		complianceMail: map[string]bool{"cl-wisp-mail": true},
 	}
 	db := openFakeProtectDB(t, state)
 
@@ -45,6 +47,9 @@ func TestPurgeExcludesProtectedBeads(t *testing.T) {
 	}
 	if _, stillThere := state.wisps["cl-wisp-cc"]; !stillThere {
 		t.Error("a compliance-seat-commented wisp was purged — cl-kf00 requires it survive")
+	}
+	if _, stillThere := state.wisps["cl-wisp-mail"]; !stillThere {
+		t.Error("a from:compliance mail wisp was purged — mail is ephemeral evidence too")
 	}
 	if _, stillThere := state.wisps["cl-wisp-plain"]; stillThere {
 		t.Error("an unprotected closed wisp was not purged")
@@ -72,19 +77,42 @@ func TestPurgeDryRunExcludesProtectedBeadsFromTheCount(t *testing.T) {
 	}
 }
 
+func TestPurgeOldMailDryRunSurfacesPreviewErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state *fakeProtectState
+	}{
+		{"query", &fakeProtectState{wisps: map[string]string{}, labelled: map[string]bool{}, compliance: map[string]bool{}, complianceMail: map[string]bool{}, mailCount: 1, mailPreviewErr: fmt.Errorf("query exploded")}},
+		{"scan", &fakeProtectState{wisps: map[string]string{}, labelled: map[string]bool{}, compliance: map[string]bool{}, complianceMail: map[string]bool{}, mailCount: 1, mailPreviewScanErr: fmt.Errorf("scan exploded")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			purgeTownRoot(t)
+			db := openFakeProtectDB(t, tc.state)
+			_, err := Purge(db, "ccm", 7*24*time.Hour, 7*24*time.Hour, true)
+			if err == nil || !strings.Contains(err.Error(), "preview old mail") {
+				t.Fatalf("Purge(dryRun) error = %v, want surfaced old-mail preview failure", err)
+			}
+		})
+	}
+}
+
 // --- a fake SQL driver that enforces the protected-bead exclusion clause ----
 
 type fakeProtectState struct {
-	wisps      map[string]string
-	labelled   map[string]bool // id -> has gt:merge-request label
-	compliance map[string]bool // id -> has a compliance-seat comment
-	eventsPath string
+	wisps              map[string]string
+	labelled           map[string]bool // id -> has gt:merge-request label
+	compliance         map[string]bool // id -> has a compliance-seat comment
+	complianceMail     map[string]bool // id -> has from:...compliance label
+	eventsPath         string
+	mailCount          int
+	mailPreviewErr     error
+	mailPreviewScanErr error
 }
 
 func (s *fakeProtectState) unprotectedIDs() []string {
 	var ids []string
 	for id := range s.wisps {
-		if s.labelled[id] || s.compliance[id] {
+		if s.labelled[id] || s.compliance[id] || s.complianceMail[id] {
 			continue
 		}
 		ids = append(ids, id)
@@ -132,7 +160,7 @@ func (c *fakeProtectConn) CheckNamedValue(*driver.NamedValue) error { return nil
 // the clause is ever dropped from purgeClosedWisps, these tests fail with a
 // clear cause instead of quietly passing.
 func requireExclusionClause(q string) error {
-	if !strings.Contains(q, "wisp_labels") || !strings.Contains(q, "wisp_comments") {
+	if !strings.Contains(q, "wisp_labels") || !strings.Contains(q, "wisp_comments") || !strings.Contains(q, "from:crew/compliance") {
 		return fmt.Errorf("query is missing the gt-12f protected-bead exclusion (wisp_labels/wisp_comments): %s", q)
 	}
 	return nil
@@ -142,6 +170,12 @@ func (c *fakeProtectConn) QueryContext(_ context.Context, query string, _ []driv
 	q := strings.Join(strings.Fields(query), " ")
 
 	switch {
+	case strings.Contains(q, "SELECT i.id FROM `ccm`.issues"):
+		if c.state.mailPreviewErr != nil {
+			return nil, c.state.mailPreviewErr
+		}
+		return &fakeProtectRows{cols: []string{"id"}, err: c.state.mailPreviewScanErr}, nil
+
 	case strings.Contains(q, "COALESCE(w.wisp_type, 'unknown')"):
 		if err := requireExclusionClause(q); err != nil {
 			return nil, err
@@ -177,7 +211,7 @@ func (c *fakeProtectConn) QueryContext(_ context.Context, query string, _ []driv
 		return &fakeProtectRows{cols: []string{"id"}}, nil
 
 	case strings.Contains(q, "SELECT COUNT(*)"):
-		return &fakeProtectRows{cols: []string{"count"}, rows: [][]driver.Value{{int64(0)}}}, nil
+		return &fakeProtectRows{cols: []string{"count"}, rows: [][]driver.Value{{int64(c.state.mailCount)}}}, nil
 	}
 	return nil, fmt.Errorf("unexpected query: %s", q)
 }
@@ -218,11 +252,15 @@ type fakeProtectRows struct {
 	cols []string
 	rows [][]driver.Value
 	next int
+	err  error
 }
 
 func (r *fakeProtectRows) Columns() []string { return r.cols }
 func (r *fakeProtectRows) Close() error      { return nil }
 func (r *fakeProtectRows) Next(dest []driver.Value) error {
+	if r.err != nil {
+		return r.err
+	}
 	if r.next >= len(r.rows) {
 		return io.EOF
 	}

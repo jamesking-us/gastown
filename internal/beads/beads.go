@@ -893,6 +893,43 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 	return b.run(args...)
 }
 
+// CommandResult preserves the observed bd process shape for safety-critical
+// callers. Most callers should continue using Run, whose normalized errors
+// are convenient. Deletion verification must instead distinguish a genuine
+// all-missing response from a Dolt outage which happens to contain "not
+// found" in stderr.
+type CommandResult struct {
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+}
+
+// RunRaw executes bd without normalizing its exit status or stderr.
+func (b *Beads) RunRaw(args ...string) (CommandResult, error) {
+	var result CommandResult
+	runEnv := b.buildRoutingEnv()
+	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // trusted internal command
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Dir = b.workDir
+	cmd.Env = append(runEnv, telemetry.OTELEnvForSubprocess()...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	result.Stdout = stripStdoutWarnings(stdout.Bytes())
+	result.Stderr = stderr.Bytes()
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		result.ExitCode = exitErr.ExitCode()
+	} else if err == nil {
+		result.ExitCode = 0
+	} else {
+		result.ExitCode = -1
+	}
+	return result, err
+}
+
 // wrapError wraps bd errors with context.
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exception: ErrNotInstalled (exec.ErrNotFound) and ErrNotFound (issue lookup) are

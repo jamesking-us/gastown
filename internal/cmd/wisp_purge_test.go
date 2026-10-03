@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 // wispFixture is the wisp population used by the subtree tests: a molecule root
@@ -300,6 +301,48 @@ esac
 	}
 }
 
+// The broad beads.ErrNotFound normalization must never certify a deletion.
+// Only the measured rc=1 all-missing JSON shape is evidence that the rows are
+// gone; a Dolt outage that says "database not found" writes no completion.
+func TestReportWispPurgeFailsClosedOnOutageShapedNotFound(t *testing.T) {
+	eventsPath := townRootForEvents(t)
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+echo '{"error":"database not found"}'
+echo 'database not found' >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	reportWispPurge("test", "test", "test", "test", beads.New(t.TempDir()),
+		[]wispaudit.Wisp{{ID: "cl-wisp-outage", Title: "outage"}}, nil, map[string]interface{}{})
+	for _, event := range readEventTypes(t, eventsPath) {
+		if event.Payload["phase"] == "completed" {
+			t.Fatalf("outage-shaped bd error wrote completed record: %+v", event)
+		}
+	}
+}
+
+func TestConfirmWispsGoneAcceptsOnlyRealAllMissingShape(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+echo '{"error":"no issues found matching the provided IDs"}'
+echo 'no issue found' >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	wisps := []wispaudit.Wisp{{ID: "cl-wisp-gone", Title: "gone"}}
+	verified, survivors, err := confirmWispsGone(beads.New(t.TempDir()), wisps)
+	if err != nil || len(survivors) != 0 || len(verified) != 1 {
+		t.Fatalf("confirmWispsGone() = verified=%v survivors=%v err=%v, want verified all-gone", verified, survivors, err)
+	}
+}
+
 // The database-wide path kept for polecat nuke must still be age-bounded.
 // gt-12f: it no longer delegates to `bd purge --older-than`, which has no
 // concept of a protected bead — the real delete is now the explicit, by-id
@@ -356,8 +399,9 @@ func TestPurgeClosedEphemeralBeadsExcludesProtectedBeads(t *testing.T) {
 	wispJSON := fmt.Sprintf(`[
 	  {"id":"ccm-wisp-mr","title":"Merge: ccm-abc","status":"closed","ephemeral":true,"labels":["gt:merge-request"],"closed_at":%q},
 	  {"id":"ccm-wisp-cc","title":"commented step","status":"closed","ephemeral":true,"comment_count":1,"closed_at":%q},
+	  {"id":"ccm-wisp-mail","title":"compliance mail","status":"closed","ephemeral":true,"labels":["from:crew/compliance"],"closed_at":%q},
 	  {"id":"ccm-wisp-plain","title":"plain step","status":"closed","ephemeral":true,"closed_at":%q}
-	]`, oldClosedAt, oldClosedAt, oldClosedAt)
+	]`, oldClosedAt, oldClosedAt, oldClosedAt, oldClosedAt)
 	calls := recordingBDWithComments(t, wispJSON, map[string]string{
 		"ccm-wisp-cc": `[{"id":"c1","author":"cloudcontentmanager/crew/compliance","text":"verdict: NOT_TRIGGERED"}]`,
 	})
@@ -377,7 +421,7 @@ func TestPurgeClosedEphemeralBeadsExcludesProtectedBeads(t *testing.T) {
 	if !strings.Contains(got, "ccm-wisp-plain") {
 		t.Errorf("delete call %q is missing the unprotected wisp", got)
 	}
-	for _, forbidden := range []string{"ccm-wisp-mr", "ccm-wisp-cc"} {
+	for _, forbidden := range []string{"ccm-wisp-mr", "ccm-wisp-cc", "ccm-wisp-mail"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("delete call %q purged a protected bead %q — cl-kf00 requires it survive", got, forbidden)
 		}

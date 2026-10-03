@@ -773,7 +773,11 @@ func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) 
 			return survivors, fmt.Errorf("verifying purge: bd show timed out after 30s")
 		}
 		if err != nil {
-			if confirmedNoIssuesFound(stdout.Bytes(), stderr.Bytes()) {
+			exitCode := -1
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			}
+			if confirmedNoIssuesFound(exitCode, stdout.Bytes(), stderr.Bytes()) {
 				// Real bd's all-missing show result is rc=1, error JSON on
 				// stdout, and "no issue found" on stderr. It confirms this
 				// complete batch is gone; every other error remains unknown.
@@ -806,17 +810,8 @@ func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) 
 // confirmedNoIssuesFound recognizes only bd's actual all-missing show result.
 // It is intentionally narrower than a substring test: an arbitrary error JSON
 // or a success exit with non-array output is an unknown verification state.
-func confirmedNoIssuesFound(stdout, stderr []byte) bool {
-	if !strings.Contains(strings.ToLower(strings.TrimSpace(string(stderr))), "no issue found") {
-		return false
-	}
-	var payload struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(extractJSON(stdout), &payload); err != nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(payload.Error), "no issues found")
+func confirmedNoIssuesFound(exitCode int, stdout, stderr []byte) bool {
+	return wispaudit.ConfirmedNoIssuesFound(exitCode, extractJSON(stdout), stderr)
 }
 
 // resolvePurgeWorkdir resolves the bd environment and working directory for a

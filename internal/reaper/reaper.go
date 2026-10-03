@@ -610,13 +610,7 @@ func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dry
 // wisp_comments cannot be queried (e.g. missing on a not-yet-migrated
 // database), the surrounding SELECT errors and purgeClosedWisps aborts rather
 // than purging unprotected — failing closed, not open.
-const protectedWispExclusionSQL = ` AND w.id NOT IN (SELECT issue_id FROM wisp_labels WHERE label = 'gt:merge-request')
-  AND w.id NOT IN (
-    SELECT issue_id FROM wisp_comments
-    WHERE author IN ('crew/compliance', 'crew/compliance_b')
-       OR author LIKE '%/crew/compliance'
-       OR author LIKE '%/crew/compliance_b'
-  )`
+var protectedWispExclusionSQL = wispaudit.ProtectedWispExclusionSQL("w.id", "wisp_labels", "wisp_comments")
 
 // closedWispsIDQuery builds the batch-delete candidate query for
 // purgeClosedWisps. It is a plain concatenation, never fmt.Sprintf, because
@@ -973,13 +967,8 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		return 0, nil, fmt.Errorf("mail delete age %s is below the mandatory minimum %s", mailDeleteAge, minimumMailDeleteAge)
 	}
 	mailCutoff := time.Now().UTC().Add(-mailDeleteAge)
-	mailProtection := fmt.Sprintf(" AND i.id NOT IN ("+
-		" SELECT issue_id FROM `%s`.labels"+
-		" WHERE label = 'gt:merge-request'"+
-		" OR label IN ('from:crew/compliance', 'from:crew/compliance_b')"+
-		" OR label LIKE 'from:%%/crew/compliance'"+
-		" OR label LIKE 'from:%%/crew/compliance_b'"+
-		")", dbName)
+	mailProtection := fmt.Sprintf(" AND i.id NOT IN (SELECT issue_id FROM `%s`.labels WHERE label = '%s' OR %s)",
+		dbName, wispaudit.ProtectedLabel, wispaudit.ComplianceMailLabelSQL("label"))
 
 	countQuery := fmt.Sprintf(
 		"SELECT COUNT(*) FROM `%s`.issues i WHERE i.status = 'closed' AND i.closed_at < ? AND i.id IN (SELECT issue_id FROM `%s`.labels WHERE label = 'gt:message')",
@@ -1005,14 +994,14 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 			dbName, dbName) + mailProtection + fmt.Sprintf(" LIMIT %d", maxPurgePreviewIDs)
 		rows, err := db.QueryContext(ctx, previewQuery, mailCutoff)
 		if err != nil {
-			return count, nil, nil
+			return count, nil, fmt.Errorf("preview old mail: %w", err)
 		}
 		defer rows.Close()
 		var ids []string
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				return count, ids, nil
+				return count, ids, fmt.Errorf("scan old mail preview: %w", err)
 			}
 			ids = append(ids, id)
 		}

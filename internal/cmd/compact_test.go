@@ -433,6 +433,21 @@ func TestDeleteWispProtectsMergeRequestLabel(t *testing.T) {
 	}
 }
 
+func TestDeleteWispProtectsComplianceMailLabel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	erroringBD(t)
+	bd := beads.New(t.TempDir())
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-compliance-mail", Title: "compliance mail", Labels: []string{"from:crew/compliance"}}}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})
+	if len(result.Deleted) != 0 || result.Skipped != 1 {
+		t.Fatalf("Deleted=%#v Skipped=%d, want compliance mail retained", result.Deleted, result.Skipped)
+	}
+}
+
 func TestDeleteWispProtectsComplianceComment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script command stubs not supported on Windows")

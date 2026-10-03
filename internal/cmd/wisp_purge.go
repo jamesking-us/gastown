@@ -31,10 +31,8 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -412,23 +410,16 @@ func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispa
 		return nil, nil, nil
 	}
 	args := append([]string{"show", "--json"}, wispaudit.IDs(wisps)...)
-	out, err := bd.Run(args...)
-	if err != nil {
-		// Real bd returns exit 1, {"error":"no issues found..."} on
-		// stdout, and "no issue found" on stderr when every requested id is
-		// gone. Beads normalizes that exact stderr shape to ErrNotFound;
-		// partial results instead exit zero with a JSON array, so they remain
-		// survivors below.
-		if errors.Is(err, beads.ErrNotFound) {
+	result, runErr := bd.RunRaw(args...)
+	if runErr != nil {
+		if confirmedNoIssuesFound(result) {
 			return wisps, nil, nil
 		}
-		return nil, nil, fmt.Errorf("reading deleted wisps: %w", err)
+		return nil, nil, fmt.Errorf("reading deleted wisps: bd show exit=%d: %w", result.ExitCode, runErr)
 	}
+	out := result.Stdout
 	out = extractJSONArray(out)
 	if len(out) == 0 || out[0] != '[' {
-		if strings.Contains(strings.ToLower(string(out)), "no issues found") {
-			return wisps, nil, nil
-		}
 		return nil, nil, fmt.Errorf("reading deleted wisps: expected JSON array")
 	}
 	var found []struct {
@@ -449,6 +440,13 @@ func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispa
 		verified = append(verified, w)
 	}
 	return verified, survivors, nil
+}
+
+// confirmedNoIssuesFound accepts only the measured bd all-missing shape:
+// exit 1, an exact JSON error object on stdout, and the companion stderr.
+// In particular an ErrNotFound-like Dolt outage is unverified, never all-gone.
+func confirmedNoIssuesFound(result beads.CommandResult) bool {
+	return wispaudit.ConfirmedNoIssuesFound(result.ExitCode, result.Stdout, result.Stderr)
 }
 
 // deleteWisps deletes wisps in batches, returning what went and what didn't.

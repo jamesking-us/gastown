@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/wispaudit"
 )
 
 // A day's patrol digests are ephemeral, so they are wisps, so deleting them is
@@ -20,6 +22,7 @@ func listingBD(t *testing.T, listJSON string) func() []string {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "argv.log")
 	dataPath := filepath.Join(binDir, "list.json")
+	showState := filepath.Join(binDir, "show-once")
 
 	if err := os.WriteFile(dataPath, []byte(listJSON), 0644); err != nil {
 		t.Fatalf("write fake list data: %v", err)
@@ -28,10 +31,10 @@ func listingBD(t *testing.T, listJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *list*) cat %q ;;
-	*show*) echo '[]' ;;
+	*show*) if [ -e %q ]; then echo '[]'; else : > %q; cat %q; fi ;;
   *) : ;;
 esac
-`, logPath, dataPath)
+`, logPath, dataPath, showState, showState, dataPath)
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
@@ -117,5 +120,19 @@ func TestDeletePatrolDigestsSkipsWhenItCannotRecord(t *testing.T) {
 		if strings.Contains(c, "delete ") {
 			t.Errorf("deleted %q with no durable record of what went", c)
 		}
+	}
+}
+
+func TestPatrolRecheckKeepsComplianceMailWisp(t *testing.T) {
+	day := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	listingBD(t, fmt.Sprintf(`[
+  {"id":"hq-wisp-mail","title":"Digest: mol-witness-patrol","status":"closed","ephemeral":true,"labels":["from:crew/compliance"],"closed_at":"2020-01-01T00:00:00Z","created_at":%q}
+]`, day.Format("2006-01-02T15:04:05Z")))
+	eligible, changed, err := recheckPatrolDigestCandidates([]wispaudit.Wisp{{ID: "hq-wisp-mail", Title: "mail"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eligible) != 0 || len(changed) != 1 {
+		t.Fatalf("eligible=%v changed=%v, want compliance mail retained", eligible, changed)
 	}
 }

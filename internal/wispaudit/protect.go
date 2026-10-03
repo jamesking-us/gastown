@@ -3,6 +3,7 @@ package wispaudit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -24,6 +25,55 @@ const ProtectedLabel = "gt:merge-request"
 // "<rig>/crew/compliance" or a bare "crew/compliance" — never on substrings
 // of comment text.
 var complianceSeats = []string{"crew/compliance", "crew/compliance_b"}
+
+// ComplianceMailLabelSQL returns the SQL predicate for the structured
+// from:<seat> labels used by mail.  Keep this alongside
+// HasComplianceMailAuthorLabel: both forms are generated from
+// complianceSeats, so a new compliance seat cannot protect Go callers while
+// leaving a SQL deleter fail-open (or vice versa).
+func ComplianceMailLabelSQL(column string) string {
+	values := make([]string, 0, len(complianceSeats)*2)
+	for _, seat := range complianceSeats {
+		values = append(values, fmt.Sprintf("'from:%s'", seat))
+	}
+	likes := make([]string, 0, len(complianceSeats))
+	for _, seat := range complianceSeats {
+		likes = append(likes, fmt.Sprintf("%s LIKE 'from:%%/%s'", column, seat))
+	}
+	return fmt.Sprintf("%s IN (%s) OR %s", column, strings.Join(values, ", "), strings.Join(likes, " OR "))
+}
+
+// ProtectedWispExclusionSQL returns the shared SQL half of the implicit-wisp
+// protection policy. labelsTable and commentsTable are caller-owned table
+// names (wisp_* for reaper rows); wispID is the outer query's id expression.
+func ProtectedWispExclusionSQL(wispID, labelsTable, commentsTable string) string {
+	commentAuthors := make([]string, 0, len(complianceSeats))
+	commentLikes := make([]string, 0, len(complianceSeats))
+	for _, seat := range complianceSeats {
+		commentAuthors = append(commentAuthors, fmt.Sprintf("'%s'", seat))
+		commentLikes = append(commentLikes, fmt.Sprintf("author LIKE '%%/%s'", seat))
+	}
+	return fmt.Sprintf(` AND %s NOT IN (SELECT issue_id FROM %s WHERE label = '%s' OR %s)
+  AND %s NOT IN (SELECT issue_id FROM %s WHERE author IN (%s) OR %s)`,
+		wispID, labelsTable, ProtectedLabel, ComplianceMailLabelSQL("label"),
+		wispID, commentsTable, strings.Join(commentAuthors, ", "), strings.Join(commentLikes, " OR "))
+}
+
+// ConfirmedNoIssuesFound recognizes only the measured bd all-missing show
+// shape. A transport or Dolt error is not proof that an id was deleted even
+// when its prose happens to include "not found".
+func ConfirmedNoIssuesFound(exitCode int, stdout, stderr []byte) bool {
+	if exitCode != 1 || !strings.Contains(strings.ToLower(string(stderr)), "no issue found") {
+		return false
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout), &payload); err != nil {
+		return false
+	}
+	return payload.Error == "no issues found matching the provided IDs"
+}
 
 // IsComplianceSeatAuthor reports whether author is a compliance seat address,
 // e.g. "cloudcontentmanager/crew/compliance" or "gastown/crew/compliance_b".

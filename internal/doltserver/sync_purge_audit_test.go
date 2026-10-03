@@ -187,6 +187,21 @@ func TestPurgeClosedEphemeralsDryRunRecordsNothing(t *testing.T) {
 	}
 }
 
+func TestPlanClosedEphemeralPurgeKeepsComplianceMail(t *testing.T) {
+	old := "2020-01-01T00:00:00Z"
+	fakeBD(t, fmt.Sprintf(`[
+  {"id":"ccm-mail","title":"compliance mail","status":"closed","ephemeral":true,"labels":["from:crew/compliance"],"closed_at":%q},
+  {"id":"ccm-plain","title":"plain","status":"closed","ephemeral":true,"closed_at":%q}
+]`, old, old))
+	doomed, excluded, err := planClosedEphemeralPurge(os.Environ(), t.TempDir())
+	if err != nil {
+		t.Fatalf("planClosedEphemeralPurge() = %v", err)
+	}
+	if excluded.ComplianceCount() != 1 || len(doomed) != 1 || doomed[0].ID != "ccm-plain" {
+		t.Fatalf("doomed=%v excluded=%+v, want only plain wisp and one compliance keep", doomed, excluded)
+	}
+}
+
 // failingQueryBD installs a `bd` whose query (the candidate listing) fails
 // outright, but whose purge would otherwise succeed — gt-12f round 2: a
 // listing failure must abort the purge, never fall through to treating "could
@@ -254,18 +269,20 @@ esac
 }
 
 func TestConfirmedNoIssuesFoundMatchesRealBDShowShape(t *testing.T) {
-	if !confirmedNoIssuesFound([]byte(`{"error":"no issues found matching the supplied IDs"}`), []byte("no issue found\n")) {
+	if !confirmedNoIssuesFound(1, []byte(`{"error":"no issues found matching the provided IDs"}`), []byte("no issue found\n")) {
 		t.Fatal("real bd all-missing output was not recognized")
 	}
 	for _, tc := range []struct {
-		stdout string
-		stderr string
+		stdout   string
+		stderr   string
+		exitCode int
 	}{
-		{`{"error":"database unavailable"}`, "no issue found"},
-		{`{"error":"no issues found"}`, "dolt unavailable"},
-		{`[]`, "no issue found"},
+		{`{"error":"database unavailable"}`, "no issue found", 1},
+		{`{"error":"no issues found matching the provided IDs"}`, "dolt unavailable", 1},
+		{`[]`, "no issue found", 1},
+		{`{"error":"no issues found matching the provided IDs"}`, "no issue found", 0},
 	} {
-		if confirmedNoIssuesFound([]byte(tc.stdout), []byte(tc.stderr)) {
+		if confirmedNoIssuesFound(tc.exitCode, []byte(tc.stdout), []byte(tc.stderr)) {
 			t.Fatalf("unexpected confirmed-gone result for stdout=%q stderr=%q", tc.stdout, tc.stderr)
 		}
 	}

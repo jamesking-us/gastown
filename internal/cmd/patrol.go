@@ -448,6 +448,29 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 			len(doomed), err)
 	}
 
+	// The list above is only a plan. Re-read the whole candidate set once,
+	// immediately before deletion: a reopened wisp, fresh close, or newly
+	// applied protection must be retained. This is deliberately batched rather
+	// than one bd query per id; the prior O(n²) recheck overloaded Dolt.
+	eligible, changed, recheckErr := recheckPatrolDigestCandidates(doomed)
+	if recheckErr != nil {
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil,
+			[]string{"pre-delete recheck: " + recheckErr.Error()}, extra)
+		return 0, fmt.Errorf("rechecking patrol digests before delete: %w", recheckErr)
+	}
+	if len(changed) > 0 {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["kept_after_recheck"] = changed
+	}
+	if len(eligible) == 0 {
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil, changed, extra)
+		return 0, fmt.Errorf("all patrol digest candidates changed before delete")
+	}
+	doomed = eligible
+	idsToDelete = wispaudit.IDs(doomed)
+
 	// Delete in batch
 	deleteArgs := append([]string{"delete", "--force"}, idsToDelete...)
 	deleteCmd := exec.Command("bd", deleteArgs...)
@@ -485,6 +508,60 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, verified, nil, extra)
 
 	return len(verified), nil
+}
+
+// recheckPatrolDigestCandidates performs one current-state read for the
+// entire delete set. Any missing or no-longer-plain closed row is retained;
+// absence of evidence is not permission to delete.
+func recheckPatrolDigestCandidates(candidates []wispaudit.Wisp) ([]wispaudit.Wisp, []string, error) {
+	if len(candidates) == 0 {
+		return nil, nil, nil
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := beads.New(workDir).Run(append([]string{"show", "--json"}, wispaudit.IDs(candidates)...)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	var current []struct {
+		ID           string    `json:"id"`
+		Status       string    `json:"status"`
+		ClosedAt     time.Time `json:"closed_at"`
+		Labels       []string  `json:"labels"`
+		CommentCount int       `json:"comment_count"`
+	}
+	if err := json.Unmarshal(extractJSONArray(out), &current); err != nil {
+		return nil, nil, fmt.Errorf("parse batched bd show: %w", err)
+	}
+	byID := make(map[string]struct {
+		Status       string
+		ClosedAt     time.Time
+		Labels       []string
+		CommentCount int
+	}, len(current))
+	for _, row := range current {
+		byID[row.ID] = struct {
+			Status       string
+			ClosedAt     time.Time
+			Labels       []string
+			CommentCount int
+		}{row.Status, row.ClosedAt, row.Labels, row.CommentCount}
+	}
+	cutoff := time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)
+	eligible := make([]wispaudit.Wisp, 0, len(candidates))
+	var changed []string
+	for _, candidate := range candidates {
+		row, found := byID[candidate.ID]
+		if !found || row.Status != "closed" || row.ClosedAt.IsZero() || row.ClosedAt.After(cutoff) ||
+			row.CommentCount != 0 || wispaudit.HasProtectedLabel(row.Labels) || wispaudit.HasComplianceMailAuthorLabel(row.Labels) {
+			changed = append(changed, candidate.ID+": changed or protected before delete")
+			continue
+		}
+		eligible = append(eligible, candidate)
+	}
+	return eligible, changed, nil
 }
 
 func patrolDigestClosedAt(cycle PatrolCycleEntry) (time.Time, bool) {
