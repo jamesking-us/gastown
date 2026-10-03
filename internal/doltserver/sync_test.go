@@ -176,6 +176,10 @@ if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
   printf 'bd version\n'
   exit 0
 fi
+if [ "$1" = "--allow-stale" ] && [ "$2" = "query" ]; then
+  printf '[]\n'
+  exit 0
+fi
 if [ "$1" = "--allow-stale" ] && [ "$2" = "purge" ]; then
   printf '{"purged_count":3}\n'
   exit 0

@@ -389,3 +389,135 @@ func TestPerformCompactionDeletesExpiredWispWhenNotDryRun(t *testing.T) {
 		t.Fatalf("bd delete --force was not issued:\n%s", args)
 	}
 }
+
+// gt-12f/cl-kf00: deleteWisp must never remove a merge-request bead or a
+// compliance-commented bead, independent of the TTL/promotion decision that
+// routed a wisp to it — see the gt-qtt gap this closes: a molecule step
+// (Parent != "") is never promoted, so before this fix a closed, past-TTL
+// molecule step carrying a compliance comment reached deleteWisp anyway.
+
+// erroringBD fails any invocation — used to prove a protected candidate is
+// rejected before bd is ever called.
+func erroringBD(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+echo "unexpected bd invocation: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestDeleteWispProtectsMergeRequestLabel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	erroringBD(t)
+	bd := beads.New(t.TempDir())
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-mr", Title: "Merge: cl-abc", Labels: []string{"gt:merge-request"}}}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})
+
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %#v, want nothing deleted — the merge-request label must protect it", result.Deleted)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", result.Skipped)
+	}
+}
+
+func TestDeleteWispProtectsComplianceComment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  comments) echo '[{"author":"cloudcontentmanager/crew/compliance"}]' ;;
+  delete) echo "deleteWisp must not delete a compliance-commented bead" >&2; exit 1 ;;
+  *) echo "unexpected bd invocation: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bd := beads.New(t.TempDir())
+	// A molecule step (Parent set) with a comment is never promoted (see
+	// performCompaction), so this is exactly the gt-qtt shape: it must still
+	// never reach the actual delete.
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-step", Title: "mol step", Parent: "cl-wisp-root"}, CommentCount: 1}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "molecule step past TTL", result, compactAudit{}, compactOptions{Quiet: true})
+
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %#v, want nothing deleted — the compliance comment must protect it", result.Deleted)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", result.Skipped)
+	}
+}
+
+func TestDeleteWispFailsClosedOnUnreadableComments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  comments) echo 'dolt: connection refused' >&2; exit 1 ;;
+  delete) echo "deleteWisp must not delete when comments are unreadable" >&2; exit 1 ;;
+  *) echo "unexpected bd invocation: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bd := beads.New(t.TempDir())
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-unknown", Title: "mystery"}, CommentCount: 1}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})
+
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %#v, want nothing deleted — an unreadable comment check must fail closed", result.Deleted)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", result.Skipped)
+	}
+}
+
+func TestDeleteWispDeletesUnprotectedWisp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  comments) echo '[{"author":"gastown/polecats/toast"}]' ;;
+  delete) exit 0 ;;
+  *) echo "unexpected bd invocation: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+	bd := beads.New(t.TempDir())
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-plain", Title: "ordinary"}, CommentCount: 1}
+	result := &compactResult{}
+
+	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})
+
+	if len(result.Deleted) != 1 || result.Deleted[0].ID != "cl-wisp-plain" {
+		t.Fatalf("Deleted = %#v, want cl-wisp-plain deleted — a plain comment from a non-compliance author is not protected", result.Deleted)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -248,16 +249,24 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 // TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge batch
 // SELECT query uses DefaultBatchSize as the LIMIT, not dbName.
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
-	// This is the fixed query — only DefaultBatchSize in the Sprintf args.
-	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?"+
-			protectedWispExclusionSQL+" LIMIT %d",
-		DefaultBatchSize)
+	// Exercises the actual production query builder, not a re-embedded copy of
+	// it — gt-12f round 2: a prior version of this test reconstructed the
+	// query with fmt.Sprintf(... + protectedWispExclusionSQL ... , "LIMIT %d"),
+	// which re-introduced the exact bug it was meant to catch. The exclusion
+	// clause's LIKE patterns ('%/crew/compliance') contain literal '%'
+	// characters, which fmt.Sprintf consumed as format verbs, producing
+	// "%!/(int=1000)" and "LIMIT %!d(MISSING)" in the query actually sent to
+	// Dolt. go vet caught it as an invalid format string in both the
+	// production code and this test.
+	idQuery := closedWispsIDQuery(DefaultBatchSize)
 
 	if strings.Contains(idQuery, "`") {
 		t.Errorf("purge idQuery should not contain a backtick-qualified (injectable) database name: %s", idQuery)
 	}
-	expected := fmt.Sprintf("LIMIT %d", DefaultBatchSize)
+	if strings.Contains(idQuery, "%!") {
+		t.Errorf("purge idQuery contains a mangled fmt.Sprintf verb, got: %s", idQuery)
+	}
+	expected := "LIMIT " + strconv.Itoa(DefaultBatchSize)
 	if !strings.Contains(idQuery, expected) {
 		t.Errorf("purge idQuery should contain %s, got: %s", expected, idQuery)
 	}
