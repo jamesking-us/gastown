@@ -204,7 +204,7 @@ func (c *fakeProtectConn) QueryContext(_ context.Context, query string, _ []driv
 		}
 		return &fakeProtectRows{cols: []string{"id", "title"}, rows: rows}, nil
 
-	case strings.Contains(q, "SELECT id FROM wisps WHERE id IN"):
+	case strings.Contains(q, "SELECT id FROM wisps WHERE id IN") || strings.Contains(q, "SELECT id FROM `wisps` WHERE id IN"):
 		// gt-12f round 2 post-delete verification: by the time this runs, the
 		// DELETE above has already removed the purged ids from state.wisps, so
 		// nothing in the queried set should still be present.

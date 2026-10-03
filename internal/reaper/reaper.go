@@ -770,7 +770,8 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		db:    dbName,
 	}
 
-	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, deleteCutoff, "wisps", auxTables,
+		" AND status = 'closed' AND closed_at < ?"+strings.ReplaceAll(protectedWispExclusionSQL, "w.id", "id"), deletionLog.planBatch)
 	if err != nil {
 		return totalDeleted, nil, anomalies, err
 	}
@@ -1039,7 +1040,9 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		titleLookup: lookupMailTitles(dbName),
 	}
 
-	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, mailCutoff, "issues", auxTables, mailLog.planBatch)
+	mailDeleteProtection := fmt.Sprintf(" AND status = 'closed' AND closed_at < ? AND id NOT IN (SELECT issue_id FROM `%s`.labels WHERE label = '%s' OR %s)",
+		dbName, wispaudit.ProtectedLabel, wispaudit.ComplianceMailLabelSQL("label"))
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, mailCutoff, "issues", auxTables, mailDeleteProtection, mailLog.planBatch)
 	if err != nil {
 		return totalDeleted, nil, err
 	}
@@ -1232,7 +1235,7 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, sqlReadWriter, []string) error) (int, error) {
+func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, primaryDeleteSuffix string, record func(context.Context, sqlReadWriter, []string) error) (int, error) {
 	totalDeleted := 0
 	for {
 		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)
@@ -1274,6 +1277,41 @@ func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cuto
 		}
 		inClause := "(" + strings.Join(placeholders, ",") + ")"
 
+		// Re-check the wisp safety boundary in the DELETE itself. A candidate
+		// can reopen, become young, or receive a compliance label between the
+		// SELECT and this statement; deleting its auxiliary rows first would
+		// erase the very protection used to decide it was safe.
+		primaryDelete := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal
+		primaryArgs := append([]interface{}{}, args...)
+		if primaryDeleteSuffix != "" {
+			primaryDelete += primaryDeleteSuffix
+			primaryArgs = append(primaryArgs, cutoffArg)
+		}
+		sqlResult, err := db.ExecContext(ctx, primaryDelete, primaryArgs...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete %s batch: %w", primaryTable, err)
+		}
+		affected, _ := sqlResult.RowsAffected()
+		totalDeleted += int(affected)
+
+		// Only clean auxiliary rows for primary rows that actually disappeared.
+		// This read also handles a concurrent re-open or protection change
+		// without relying on RowsAffected to identify which IDs changed.
+		remaining, err := existingPrimaryIDs(ctx, db, primaryTable, ids)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("verify %s batch before auxiliary cleanup: %w", primaryTable, err)
+		}
+		ids = withoutIDs(ids, remaining)
+		if len(ids) == 0 {
+			continue
+		}
+		placeholders = make([]string, len(ids))
+		args = make([]interface{}, len(ids))
+		for i, id := range ids {
+			placeholders[i], args[i] = "?", id
+		}
+		inClause = "(" + strings.Join(placeholders, ",") + ")"
+
 		for _, tbl := range auxTables {
 			delAux := fmt.Sprintf("DELETE FROM `%s` WHERE issue_id IN %s", tbl, inClause) //nolint:gosec // G201: tbl is internal
 			if _, err := db.ExecContext(ctx, delAux, args...); err != nil {
@@ -1301,16 +1339,45 @@ func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cuto
 			}
 		}
 
-		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal
-		sqlResult, err := db.ExecContext(ctx, delPrimary, args...)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete %s batch: %w", primaryTable, err)
-		}
-		affected, _ := sqlResult.RowsAffected()
-		totalDeleted += int(affected)
 	}
 
 	return totalDeleted, nil
+}
+
+func existingPrimaryIDs(ctx context.Context, db sqlReadWriter, table string, ids []string) ([]string, error) {
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i], args[i] = "?", id
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM `%s` WHERE id IN (%s)", table, strings.Join(placeholders, ",")), args...) //nolint:gosec // G201: table is internal
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		found = append(found, id)
+	}
+	return found, rows.Err()
+}
+
+func withoutIDs(ids, excluded []string) []string {
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, id := range excluded {
+		excludedSet[id] = struct{}{}
+	}
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, found := excludedSet[id]; !found {
+			kept = append(kept, id)
+		}
+	}
+	return kept
 }
 
 // ClosePluginReceiptResult holds the results of closing plugin run receipts.
