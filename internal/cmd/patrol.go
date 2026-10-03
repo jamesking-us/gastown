@@ -400,6 +400,11 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	doomed := make([]wispaudit.Wisp, 0, len(cycles))
 	var kept int
 	for _, cycle := range cycles {
+		closedAt, ok := patrolDigestClosedAt(cycle)
+		if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+			kept++
+			continue
+		}
 		if wispaudit.HasProtectedLabel(cycle.Labels) {
 			kept++
 			continue
@@ -476,4 +481,11 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, verified, nil, extra)
 
 	return len(verified), nil
+}
+
+func patrolDigestClosedAt(cycle PatrolCycleEntry) (time.Time, bool) {
+	if cycle.ClosedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return cycle.ClosedAt.UTC(), true
 }

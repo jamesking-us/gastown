@@ -577,6 +577,9 @@ func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dry
 	if purgeAge < minimumWispPurgeAge {
 		return nil, fmt.Errorf("purge age %s is below the mandatory minimum %s", purgeAge, minimumWispPurgeAge)
 	}
+	if mailDeleteAge < minimumWispPurgeAge {
+		return nil, fmt.Errorf("mail delete age %s is below the mandatory minimum %s", mailDeleteAge, minimumWispPurgeAge)
+	}
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.
@@ -774,29 +777,6 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	}
 
 	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
-	if totalDeleted > 0 {
-		verifiedGone := deletionLog.planned
-		var verificationFailures []string
-		if survivors, verifyErr := verifyWispsGone(ctx, conn, wispaudit.IDs(deletionLog.planned)); verifyErr != nil {
-			anomalies = append(anomalies, Anomaly{
-				Type:    "purge_verify_failed",
-				Message: fmt.Sprintf("could not confirm deletion: %v", verifyErr),
-			})
-			verifiedGone = nil
-			verificationFailures = append(verificationFailures, "post-delete verification: "+verifyErr.Error())
-		} else if len(survivors) > 0 {
-			anomalies = append(anomalies, Anomaly{
-				Type:    "purge_survivors",
-				Message: fmt.Sprintf("still present after purge: %s", strings.Join(survivors, ", ")),
-				Count:   len(survivors),
-			})
-			verifiedGone = wispsWithoutIDs(verifiedGone, survivors)
-			for _, id := range survivors {
-				verificationFailures = append(verificationFailures, id+": still present after purge")
-			}
-		}
-		deletionLog.completed(verifiedGone, verificationFailures, map[string]interface{}{"deleted_rows": totalDeleted})
-	}
 	if err != nil {
 		return totalDeleted, nil, anomalies, err
 	}
@@ -810,6 +790,23 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 			})
 			return totalDeleted, nil, anomalies, nil
 		}
+		// A completion receipt is evidence of a committed delete, not of a
+		// transaction that may still roll back. Verify after COMMIT, on this
+		// same pinned connection, before closing the record.
+		verifiedGone := deletionLog.planned
+		var verificationFailures []string
+		if survivors, verifyErr := verifyWispsGone(ctx, conn, wispaudit.IDs(deletionLog.planned)); verifyErr != nil {
+			anomalies = append(anomalies, Anomaly{Type: "purge_verify_failed", Message: fmt.Sprintf("could not confirm deletion: %v", verifyErr)})
+			verifiedGone = nil
+			verificationFailures = append(verificationFailures, "post-commit verification: "+verifyErr.Error())
+		} else if len(survivors) > 0 {
+			anomalies = append(anomalies, Anomaly{Type: "purge_survivors", Message: fmt.Sprintf("still present after purge: %s", strings.Join(survivors, ", ")), Count: len(survivors)})
+			verifiedGone = wispsWithoutIDs(verifiedGone, survivors)
+			for _, id := range survivors {
+				verificationFailures = append(verificationFailures, id+": still present after purge")
+			}
+		}
+		deletionLog.completed(verifiedGone, verificationFailures, map[string]interface{}{"deleted_rows": totalDeleted})
 		commitMsg := fmt.Sprintf("reaper: purge %d closed wisps from %s", totalDeleted, dbName)
 		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// Non-fatal — log but continue.
@@ -971,11 +968,22 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	const minimumMailDeleteAge = 7 * 24 * time.Hour
+	if mailDeleteAge < minimumMailDeleteAge {
+		return 0, nil, fmt.Errorf("mail delete age %s is below the mandatory minimum %s", mailDeleteAge, minimumMailDeleteAge)
+	}
 	mailCutoff := time.Now().UTC().Add(-mailDeleteAge)
+	mailProtection := fmt.Sprintf(" AND i.id NOT IN ("+
+		" SELECT issue_id FROM `%s`.labels"+
+		" WHERE label = 'gt:merge-request'"+
+		" OR label IN ('from:crew/compliance', 'from:crew/compliance_b')"+
+		" OR label LIKE 'from:%%/crew/compliance'"+
+		" OR label LIKE 'from:%%/crew/compliance_b'"+
+		")", dbName)
 
 	countQuery := fmt.Sprintf(
-		"SELECT COUNT(*) FROM `%s`.issues WHERE status = 'closed' AND closed_at < ? AND id IN (SELECT issue_id FROM `%s`.labels WHERE label = 'gt:message')",
-		dbName, dbName)
+		"SELECT COUNT(*) FROM `%s`.issues i WHERE i.status = 'closed' AND i.closed_at < ? AND i.id IN (SELECT issue_id FROM `%s`.labels WHERE label = 'gt:message')",
+		dbName, dbName) + mailProtection
 	var count int
 	if err := db.QueryRowContext(ctx, countQuery, mailCutoff).Scan(&count); err != nil {
 		if isTableNotFound(err) {
@@ -988,13 +996,13 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 	}
 
 	idQuery := fmt.Sprintf(
-		"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message' LIMIT %d",
-		dbName, dbName, DefaultBatchSize)
+		"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message'",
+		dbName, dbName) + mailProtection + fmt.Sprintf(" LIMIT %d", DefaultBatchSize)
 
 	if dryRun {
 		previewQuery := fmt.Sprintf(
-			"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message' LIMIT %d",
-			dbName, dbName, maxPurgePreviewIDs)
+			"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message'",
+			dbName, dbName) + mailProtection + fmt.Sprintf(" LIMIT %d", maxPurgePreviewIDs)
 		rows, err := db.QueryContext(ctx, previewQuery, mailCutoff)
 		if err != nil {
 			return count, nil, nil
@@ -1008,14 +1016,24 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 			}
 			ids = append(ids, id)
 		}
+		if err := rows.Err(); err != nil {
+			return count, ids, fmt.Errorf("preview old mail: %w", err)
+		}
 		return count, ids, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+	// autocommit and a transaction view are connection-local. Pin planning,
+	// delete, COMMIT and post-commit verification to one connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("acquire mail purge connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
 		return 0, nil, fmt.Errorf("disable autocommit: %w", err)
 	}
 	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
 	auxTables := []string{"labels", "comments", "events", "dependencies"}
@@ -1032,26 +1050,65 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		titleLookup: lookupMailTitles(dbName),
 	}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables, mailLog.planBatch)
-	if totalDeleted > 0 {
-		mailLog.completed(mailLog.planned, nil, map[string]interface{}{"deleted_rows": totalDeleted})
-	}
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, mailCutoff, "issues", auxTables, mailLog.planBatch)
 	if err != nil {
 		return totalDeleted, nil, err
 	}
 
 	if totalDeleted > 0 {
 		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return totalDeleted, nil, fmt.Errorf("sql commit: %w", err)
 		}
+		verified, survivors, verifyErr := verifyMailGone(ctx, conn, dbName, wispaudit.IDs(mailLog.planned))
+		extra := map[string]interface{}{"deleted_rows": totalDeleted}
+		if verifyErr != nil {
+			mailLog.completed(nil, []string{"post-commit verification: " + verifyErr.Error()}, extra)
+		} else if len(survivors) > 0 {
+			extra["survived_purge"] = survivors
+			failures := make([]string, 0, len(survivors))
+			for _, id := range survivors {
+				failures = append(failures, id+": still present after purge")
+			}
+			mailLog.completed(wispsWithoutIDs(mailLog.planned, survivors), failures, extra)
+		} else {
+			mailLog.completed(verified, nil, extra)
+		}
 		commitMsg := fmt.Sprintf("reaper: purge %d old mail from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// Non-fatal.
 		}
 	}
 
 	return totalDeleted, nil, nil
+}
+
+func verifyMailGone(ctx context.Context, db sqlReadWriter, dbName string, ids []string) ([]wispaudit.Wisp, []string, error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i], args[i] = "?", id
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM `%s`.issues WHERE id IN (%s)", dbName, strings.Join(placeholders, ",")), args...) //nolint:gosec // G201: dbName is validated by caller
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var survivors []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, survivors, err
+		}
+		survivors = append(survivors, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, survivors, err
+	}
+	return wispsWithoutIDs(wispaudit.WispsFromIDs(ids), survivors), survivors, nil
 }
 
 // AutoClose closes issues that have been open with no updates past staleAge.

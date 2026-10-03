@@ -317,7 +317,7 @@ func setupExpiredWispStub(t *testing.T) string {
 printf '%s\n' "$*" >> "$BD_ARGS_LOG"
 case "$1" in
   list)
-    printf '[{"id":"hq-wisp-expired","title":"stale heartbeat","status":"closed","issue_type":"chore","ephemeral":true,"wisp_type":"heartbeat","created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z"}]\n'
+    printf '[{"id":"hq-wisp-expired","title":"stale heartbeat","status":"closed","issue_type":"chore","ephemeral":true,"wisp_type":"heartbeat","created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z","closed_at":"2020-01-01T00:00:00Z"}]\n'
     ;;
   delete)
     exit 0
@@ -529,6 +529,7 @@ func TestDeleteWispDeletesUnprotectedWisp(t *testing.T) {
 	binDir := t.TempDir()
 	script := `#!/bin/sh
 case "$1" in
+  list) echo '[{"id":"cl-wisp-plain","title":"ordinary","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z","comment_count":1}]' ;;
   comments) echo '[{"author":"gastown/polecats/toast"}]' ;;
   delete) exit 0 ;;
 	show) echo '[]' ;;
@@ -542,7 +543,7 @@ esac
 	beads.ResetBdAllowStaleCacheForTest()
 	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
 	bd := beads.New(t.TempDir())
-	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-plain", Title: "ordinary"}, CommentCount: 1}
+	w := &compactIssue{Issue: beads.Issue{ID: "cl-wisp-plain", Title: "ordinary", Status: "closed", ClosedAt: "2020-01-01T00:00:00Z"}, CommentCount: 1}
 	result := &compactResult{}
 
 	deleteWisp(bd, w, "TTL expired", result, compactAudit{}, compactOptions{Quiet: true})

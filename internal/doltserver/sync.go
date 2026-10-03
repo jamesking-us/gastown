@@ -581,11 +581,11 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 	return results
 }
 
-// PurgeClosedEphemerals runs "bd purge" for a specific rig database to remove
-// closed ephemeral beads (wisps, convoys) before pushing to DoltHub.
+// PurgeClosedEphemerals explicitly deletes eligible closed ephemeral beads by
+// id for a specific rig database before pushing to DoltHub.
 // Returns the number of beads purged and any error encountered.
 // Errors are non-fatal — the caller should log them but continue with sync.
-// Must be called while the Dolt server is still running (bd purge needs SQL access).
+// Must be called while the Dolt server is still running (bd needs SQL access).
 //
 // path names the caller for the deletion record (hq-6ewp): what this removes is
 // in dolt_ignore, so it is never committed and no AS OF can read it back, and
@@ -773,6 +773,12 @@ func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) 
 			return survivors, fmt.Errorf("verifying purge: bd show timed out after 30s")
 		}
 		if err != nil {
+			if confirmedNoIssuesFound(stdout.Bytes(), stderr.Bytes()) {
+				// Real bd's all-missing show result is rc=1, error JSON on
+				// stdout, and "no issue found" on stderr. It confirms this
+				// complete batch is gone; every other error remains unknown.
+				continue
+			}
 			errMsg := strings.TrimSpace(stderr.String())
 			if errMsg == "" {
 				errMsg = strings.TrimSpace(stdout.String())
@@ -782,7 +788,7 @@ func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) 
 
 		out := extractJSONArray(stdout.Bytes())
 		if len(out) == 0 || out[0] != '[' {
-			continue // bd's "nothing found" shape — the whole batch is confirmed gone
+			return survivors, fmt.Errorf("verifying purge: unexpected bd show output: %s", strings.TrimSpace(stdout.String()))
 		}
 		var found []struct {
 			ID string `json:"id"`
@@ -795,6 +801,22 @@ func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) 
 		}
 	}
 	return survivors, nil
+}
+
+// confirmedNoIssuesFound recognizes only bd's actual all-missing show result.
+// It is intentionally narrower than a substring test: an arbitrary error JSON
+// or a success exit with non-array output is an unknown verification state.
+func confirmedNoIssuesFound(stdout, stderr []byte) bool {
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(string(stderr))), "no issue found") {
+		return false
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(extractJSON(stdout), &payload); err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(payload.Error), "no issues found")
 }
 
 // resolvePurgeWorkdir resolves the bd environment and working directory for a

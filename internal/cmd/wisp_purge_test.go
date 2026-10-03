@@ -172,12 +172,12 @@ func readEventTypes(t *testing.T, path string) []events.Event {
 }
 
 const fixtureWispJSON = `[
-  {"id":"cl-wisp-root","title":"mol-polecat-work","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-step1","title":"Step 1: read the bead","parent":"cl-wisp-root","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-root","title":"mol-polecat-work","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
+  {"id":"cl-wisp-step1","title":"Step 1: read the bead","parent":"cl-wisp-root","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
   {"id":"cl-wisp-step2","title":"Step 2: implement","parent":"cl-wisp-root","status":"open","ephemeral":true},
-  {"id":"cl-wisp-kept","title":"Step 3: commented","parent":"cl-wisp-root","status":"closed","ephemeral":true,"comment_count":2},
-  {"id":"cl-wisp-other","title":"another agent","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-other-step","title":"another agent step","parent":"cl-wisp-other","status":"closed","ephemeral":true}
+  {"id":"cl-wisp-kept","title":"Step 3: commented","parent":"cl-wisp-root","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z","comment_count":2},
+  {"id":"cl-wisp-other","title":"another agent","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
+  {"id":"cl-wisp-other-step","title":"another agent step","parent":"cl-wisp-other","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"}
 ]`
 
 // The regression this bead exists for: a completion must delete only its own
@@ -260,6 +260,43 @@ func TestPurgeOwnClosedWispsSkipsWhenReceiptCannotBeWritten(t *testing.T) {
 		if strings.Contains(c, "delete ") {
 			t.Errorf("deleted %q with no durable receipt available", c)
 		}
+	}
+}
+
+// The plan can be stale by the time bd delete runs. A reopen between those
+// reads must be retained rather than force-deleted from the old plan.
+func TestPurgeOwnClosedWispsRechecksBeforeDelete(t *testing.T) {
+	townRootForEvents(t)
+	binDir := t.TempDir()
+	state := filepath.Join(binDir, "queried")
+	logPath := filepath.Join(binDir, "argv.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1" in
+  query)
+    if [ -e %q ]; then
+      echo '[{"id":"cl-wisp-root","title":"root","status":"open","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"}]'
+    else
+      : > %q
+      echo '[{"id":"cl-wisp-root","title":"root","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"}]'
+    fi ;;
+  delete) echo 'stale plan must not delete reopened wisp' >&2; exit 1 ;;
+  show) echo '[]' ;;
+esac
+`, logPath, state, state)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+	purgeOwnClosedWisps(beads.New(t.TempDir()), "ccm/polecats/test", "ccm", "cl-wisp-root")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "delete ") {
+		t.Fatalf("reopened wisp reached bd delete:\n%s", data)
 	}
 }
 

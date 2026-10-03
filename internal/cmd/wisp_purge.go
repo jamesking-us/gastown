@@ -31,6 +31,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -166,6 +167,14 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 		// Closed only. A wisp that is open, blocked, in_progress or pinned is
 		// live state, and pinned rows are protected by policy (hq-gk8d interim).
 		if w.Status != "closed" {
+			continue
+		}
+		closedAt, ok := wispClosedAt(w)
+		if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+			// A scoped completion purge still has the mandatory seven-day
+			// floor. Its only exception is intentionally absent here: a polecat
+			// may not silently make its just-closed molecule steps disposable.
+			kept++
 			continue
 		}
 		if isEvidenceBearing(w) {
@@ -329,14 +338,10 @@ func commentsAreProtected(bd *beads.Beads, id string, expectedCount int) (protec
 	return wispaudit.AnyComplianceSeatAuthor(authors), true
 }
 
-// wispClosedAt reports when a wisp was closed, falling back to its last update
-// when bd omits closed_at. A wisp whose timestamp will not parse reports false;
-// purge planning treats that as unknown and keeps it, preserving the age floor.
+// wispClosedAt reports when a wisp was closed. Missing or malformed closed_at
+// is unknown, never an excuse to substitute updated_at and delete it.
 func wispClosedAt(w *purgeCandidate) (time.Time, bool) {
 	ts := w.ClosedAt
-	if ts == "" {
-		ts = w.UpdatedAt
-	}
 	if ts == "" {
 		return time.Time{}, false
 	}
@@ -402,6 +407,14 @@ func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispa
 	args := append([]string{"show", "--json"}, wispaudit.IDs(wisps)...)
 	out, err := bd.Run(args...)
 	if err != nil {
+		// Real bd returns exit 1, {"error":"no issues found..."} on
+		// stdout, and "no issue found" on stderr when every requested id is
+		// gone. Beads normalizes that exact stderr shape to ErrNotFound;
+		// partial results instead exit zero with a JSON array, so they remain
+		// survivors below.
+		if errors.Is(err, beads.ErrNotFound) {
+			return wisps, nil, nil
+		}
 		return nil, nil, fmt.Errorf("reading deleted wisps: %w", err)
 	}
 	out = extractJSONArray(out)
@@ -435,20 +448,25 @@ func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispa
 // A failed batch is reported rather than retried one id at a time: the plan
 // record already names every id, so a partial purge is auditable as it stands.
 func deleteWisps(bd *beads.Beads, wisps []wispaudit.Wisp) (deleted []wispaudit.Wisp, failures []string) {
-	for start := 0; start < len(wisps); start += maxWispDeleteBatch {
-		end := start + maxWispDeleteBatch
-		if end > len(wisps) {
-			end = len(wisps)
-		}
-		batch := wisps[start:end]
-		ids := wispaudit.IDs(batch)
-		args := append([]string{"delete"}, ids...)
-		args = append(args, "--force")
-		if _, err := bd.Run(args...); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", strings.Join(ids, ","), err))
+	for _, wisp := range wisps {
+		// The plan is only a snapshot. Re-read this exact id immediately
+		// before the destructive call so a reopen, fresh close, or newly-added
+		// compliance verdict cannot be erased between planning and deletion.
+		eligible, err := wispStillDeleteEligible(bd, wisp.ID)
+		if err != nil {
+			failures = append(failures, wisp.ID+": re-check before delete: "+err.Error())
 			continue
 		}
-		deleted = append(deleted, batch...)
+		if !eligible {
+			failures = append(failures, wisp.ID+": changed after purge plan; kept")
+			continue
+		}
+		args := []string{"delete", wisp.ID, "--force"}
+		if _, err := bd.Run(args...); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", wisp.ID, err))
+			continue
+		}
+		deleted = append(deleted, wisp)
 	}
 	if len(deleted) > 0 {
 		fmt.Fprintf(os.Stderr, "Purged %d closed wisp(s) from this session's molecule\n", len(deleted))
@@ -457,4 +475,36 @@ func deleteWisps(bd *beads.Beads, wisps []wispaudit.Wisp) (deleted []wispaudit.W
 		fmt.Fprintf(os.Stderr, "Warning: wisp delete failed: %s\n", f)
 	}
 	return deleted, failures
+}
+
+// wispStillDeleteEligible is the last safety boundary before an explicit bd
+// delete. It deliberately repeats the full status, closed_at, label, and
+// comment-author checks rather than trusting an earlier plan.
+func wispStillDeleteEligible(bd *beads.Beads, id string) (bool, error) {
+	all, err := listAllWisps(bd)
+	if err != nil {
+		return false, err
+	}
+	var w *purgeCandidate
+	for _, candidate := range all {
+		if candidate.ID == id {
+			w = candidate
+			break
+		}
+	}
+	if w == nil || w.Status != "closed" {
+		return false, nil
+	}
+	closedAt, ok := wispClosedAt(w)
+	if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+		return false, nil
+	}
+	if wispaudit.HasProtectedLabel(w.Labels) {
+		return false, nil
+	}
+	if w.CommentCount == 0 {
+		return true, nil
+	}
+	protected, readable := commentsAreProtected(bd, w.ID, w.CommentCount)
+	return readable && !protected, nil
 }

@@ -379,7 +379,7 @@ func init() {
 	doltSyncCmd.Flags().BoolVar(&doltSyncDry, "dry-run", false, "Preview what would be pushed without pushing")
 	doltSyncCmd.Flags().BoolVar(&doltSyncForce, "force", false, "Force-push to remotes")
 	doltSyncCmd.Flags().StringVar(&doltSyncDB, "db", "", "Sync a single database instead of all")
-	doltSyncCmd.Flags().BoolVar(&doltSyncGC, "gc", false, "Purge closed ephemeral beads before push (requires bd purge)")
+	doltSyncCmd.Flags().BoolVar(&doltSyncGC, "gc", false, "Purge eligible closed ephemeral beads by explicit id before push")
 
 	doltPullCmd.Flags().BoolVar(&doltPullDry, "dry-run", false, "Preview what would be pulled without pulling")
 	doltPullCmd.Flags().StringVar(&doltPullDB, "db", "", "Pull a single database instead of all")

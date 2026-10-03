@@ -50,6 +50,22 @@ func HasProtectedLabel(labels []string) bool {
 	return false
 }
 
+// HasComplianceMailAuthorLabel reports whether labels identify a mail as
+// authored by either compliance seat. Mail stores its sender as a `from:`
+// label rather than as a comment author, so it needs the same structured
+// protection rule in a form that applies to every mail deletion path.
+func HasComplianceMailAuthorLabel(labels []string) bool {
+	for _, label := range labels {
+		if !strings.HasPrefix(label, "from:") {
+			continue
+		}
+		if IsComplianceSeatAuthor(strings.TrimPrefix(label, "from:")) {
+			return true
+		}
+	}
+	return false
+}
+
 // AnyComplianceSeatAuthor reports whether any comment author in authors is a
 // compliance seat.
 func AnyComplianceSeatAuthor(authors []string) bool {

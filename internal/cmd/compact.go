@@ -278,7 +278,10 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 				promoteWisp(bd, w, "proven value", result, opts)
 			} else if age > ttl {
 				if isMoleculeStep {
-					deleteWisp(bd, w, "molecule step past TTL", result, audit, opts)
+					// An open molecule step is live workflow state, even when its
+					// TTL is stale. Only a later closed, seven-day-old step can
+					// enter a delete path.
+					result.Skipped++
 				} else {
 					reason := "open past TTL"
 					if w.Status == "in_progress" {
@@ -443,6 +446,38 @@ type compactAudit struct {
 // is a batch record that can be minutes stale by the time the delete it
 // describes actually happens.
 func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult, audit compactAudit, opts compactOptions) {
+	// The compaction scan is only a plan. Re-read the exact candidate at the
+	// delete boundary so a reopened, newly protected, or newly closed wisp is
+	// not deleted from stale state.
+	all, err := listWisps(bd)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: re-check before delete: %v", w.ID, err))
+		return
+	}
+	var current *compactIssue
+	for _, candidate := range all {
+		if candidate.ID == w.ID {
+			current = candidate
+			break
+		}
+	}
+	if current == nil {
+		result.Skipped++
+		return
+	}
+	w = current
+	if w.Status != "closed" {
+		result.Skipped++
+		return
+	}
+	closedAt, ok := compactClosedAt(w)
+	if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+		// Compaction's per-type TTL may be shorter than the deletion floor;
+		// it may promote stale open work, but it never deletes a closed wisp
+		// without a parseable closed_at at least seven days old.
+		result.Skipped++
+		return
+	}
 	// gt-12f/cl-kf00: a molecule step with a Parent is never promoted (see the
 	// caller), so a closed, past-TTL molecule step carrying a compliance
 	// comment used to reach this function and be deleted anyway — the comment
@@ -480,7 +515,7 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
-	_, err := bd.Run("delete", w.ID, "--force")
+	_, err = bd.Run("delete", w.ID, "--force")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: %v", w.ID, err))
 		return
@@ -509,6 +544,18 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		fmt.Printf("  %s %s %s (%s)\n",
 			style.Warning.Render("delete "), w.ID, compactTruncate(w.Title, 40), reason)
 	}
+}
+
+func compactClosedAt(w *compactIssue) (time.Time, bool) {
+	if w.ClosedAt == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z"} {
+		if t, err := time.Parse(layout, w.ClosedAt); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func printCompactSummary(result *compactResult, opts compactOptions) {
