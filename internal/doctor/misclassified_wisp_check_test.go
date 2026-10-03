@@ -236,20 +236,28 @@ func TestMisclassifiedWispDependencyMigrationIsTypedAndFailClosed(t *testing.T) 
 		"LEFT JOIN wisps target_wisp ON target_wisp.id = d.depends_on_issue_id",
 		"UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_issue_id, depends_on_issue_id = NULL WHERE depends_on_issue_id IN",
 		"UPDATE dependencies SET depends_on_wisp_id = depends_on_issue_id, depends_on_issue_id = NULL WHERE depends_on_issue_id IN",
-		"return fmt.Errorf(\"copying wisp_dependencies: %w\", err)",
+		"required table %q is unavailable; kept source",
+		"verifyMisclassifiedWispCopy(workDir, idList)",
+		"SHA2(CONCAT_WS('|', COALESCE(id",
+		"AND closed_at <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)",
+		"source no longer met deletion safeguards; kept source",
+		"misclassifiedWispSourceAbsent(workDir, idList)",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("purgeRigBatch missing %q:\n%s", want, body)
 		}
 	}
-	copyFailure := strings.Index(body, "return fmt.Errorf(\"copying wisp_dependencies: %w\", err)")
+	copyFailure := strings.Index(body, "return fmt.Errorf(\"copy related rows: %w\", err)")
 	retargetWisp := strings.Index(body, "UPDATE wisp_dependencies SET depends_on_wisp_id")
-	deleteIssue := strings.Index(body, "DELETE FROM issues WHERE id IN")
+	deleteIssue := strings.Index(body, "DELETE FROM issues")
 	if copyFailure == -1 || deleteIssue == -1 || copyFailure > deleteIssue {
 		t.Fatalf("purgeRigBatch must abort before deleting source issues when dependency copy fails:\n%s", body)
 	}
 	if retargetWisp == -1 || deleteIssue == -1 || retargetWisp > deleteIssue {
 		t.Fatalf("purgeRigBatch must retarget incoming dependency rows before deleting source issues:\n%s", body)
+	}
+	if strings.Contains(body, "INSERT IGNORE INTO") {
+		t.Fatalf("purgeRigBatch must not treat an ignored insert as a copied row:\n%s", body)
 	}
 }
 
@@ -265,7 +273,7 @@ printf '%s\n' "$query" >> "$BD_SQL_LOG"
 if [[ "$query" == *"SELECT 1 FROM"* ]]; then
   exit 0
 fi
-if [[ "$query" == *"INSERT IGNORE INTO wisp_dependencies"* ]]; then
+if [[ "$query" == *"INSERT INTO wisp_dependencies"* ]]; then
   echo "copy failed"
   exit 7
 fi
@@ -278,8 +286,8 @@ exit 0
 	t.Setenv("BD_SQL_LOG", logPath)
 
 	err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'")
-	if err == nil || !strings.Contains(err.Error(), "copying wisp_dependencies") {
-		t.Fatalf("purgeRigBatch error = %v, want copying wisp_dependencies", err)
+	if err == nil || !strings.Contains(err.Error(), "copy related rows") {
+		t.Fatalf("purgeRigBatch error = %v, want copy related rows", err)
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -295,6 +303,175 @@ exit 0
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("purgeRigBatch ran %q after dependency copy failure:\n%s", forbidden, log)
 		}
+	}
+}
+
+func TestMisclassifiedWispCommentCopyFailureSkipsDeletes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd stub is shell-specific")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-sql.log")
+	script := `#!/usr/bin/env bash
+query="${@: -1}"
+printf '%s\n' "$query" >> "$BD_SQL_LOG"
+if [[ "$query" == *"SELECT 1 FROM"* ]]; then
+  exit 0
+fi
+if [[ "$query" == *"INSERT INTO wisp_comments"* ]]; then
+  echo "comment copy failed"
+  exit 7
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", logPath)
+
+	err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'")
+	if err == nil || !strings.Contains(err.Error(), "copy related rows") {
+		t.Fatalf("purgeRigBatch error = %v, want comment copy failure", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"UPDATE wisp_dependencies SET depends_on_wisp_id",
+		"UPDATE dependencies SET depends_on_wisp_id",
+		"DELETE FROM issues",
+		"DELETE FROM comments",
+	} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("purgeRigBatch ran %q after comment copy failure:\n%s", forbidden, data)
+		}
+	}
+}
+
+func TestMisclassifiedWispMissingCommentsTableSkipsDeletes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd stub is shell-specific")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-sql.log")
+	script := `#!/usr/bin/env bash
+query="${@: -1}"
+printf '%s\n' "$query" >> "$BD_SQL_LOG"
+if [[ "$query" == *"wisp_comments"* ]]; then
+  exit 1
+fi
+if [[ "$query" == *"SELECT 1 FROM"* ]]; then
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", logPath)
+
+	err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'")
+	if err == nil || !strings.Contains(err.Error(), "wisp_comments") {
+		t.Fatalf("purgeRigBatch error = %v, want missing wisp_comments", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"INSERT INTO wisps", "DELETE FROM issues", "DELETE FROM comments"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("purgeRigBatch ran %q despite missing wisp_comments:\n%s", forbidden, data)
+		}
+	}
+}
+
+func TestMisclassifiedWispCommentMismatchSkipsDeletes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd stub is shell-specific")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-sql.log")
+	script := `#!/usr/bin/env bash
+query="${@: -1}"
+printf '%s\n' "$query" >> "$BD_SQL_LOG"
+if [[ "$query" == *"SELECT 1 FROM"* ]]; then
+  exit 0
+fi
+if [[ "$query" == *"SHA2(CONCAT_WS"* ]]; then
+  printf 'count\n1\n'
+  exit 0
+fi
+if [[ "$query" == SELECT* ]]; then
+  printf 'count\n0\n'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", logPath)
+
+	err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'")
+	if err == nil || !strings.Contains(err.Error(), "comment content digests mismatch") {
+		t.Fatalf("purgeRigBatch error = %v, want comment digest mismatch", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "author") {
+		t.Fatalf("comment verification did not include author:\n%s", data)
+	}
+	if strings.Contains(string(data), "DELETE FROM issues") {
+		t.Fatalf("purgeRigBatch deleted source after a comment mismatch:\n%s", data)
+	}
+}
+
+func TestMisclassifiedWispHappyPathVerifiesBeforeDeleting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd stub is shell-specific")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-sql.log")
+	originalCommit := commitMisclassifiedWispWorkingSet
+	commitMisclassifiedWispWorkingSet = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { commitMisclassifiedWispWorkingSet = originalCommit })
+	script := `#!/usr/bin/env bash
+query="${@: -1}"
+printf '%s\n' "$query" >> "$BD_SQL_LOG"
+if [[ "$query" == *"SELECT 1 FROM"* ]]; then
+  exit 0
+fi
+if [[ "$query" == SELECT* ]]; then
+  printf 'count\n0\n'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", logPath)
+
+	if err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'"); err != nil {
+		t.Fatalf("purgeRigBatch: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	copyComment := strings.Index(log, "INSERT INTO wisp_comments")
+	verifyComment := strings.Index(log, "SHA2(CONCAT_WS")
+	deleteIssue := strings.Index(log, "DELETE FROM issues")
+	if copyComment == -1 || verifyComment == -1 || deleteIssue == -1 || !(copyComment < verifyComment && verifyComment < deleteIssue) {
+		t.Fatalf("expected copy, verify, then delete ordering:\n%s", log)
 	}
 }
 

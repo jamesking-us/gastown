@@ -53,7 +53,8 @@ func fakeBD(t *testing.T, queryJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *query*) cat %q ;;
-  *purge*) echo '{"purged_count": 2}' ;;
+  *delete*) : ;;
+  *show*) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath)
@@ -78,8 +79,8 @@ esac
 }
 
 const gcWispJSON = `[
-  {"id":"cl-wisp-aaa","title":"mol-polecat-work step 1","status":"closed","ephemeral":true},
-  {"id":"cl-wisp-bbb","title":"mol-polecat-work step 2","status":"closed","ephemeral":true},
+  {"id":"cl-wisp-aaa","title":"mol-polecat-work step 1","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
+  {"id":"cl-wisp-bbb","title":"mol-polecat-work step 2","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},
   {"id":"cl-wisp-live","title":"still working","status":"open","ephemeral":true}
 ]`
 
@@ -92,17 +93,17 @@ func TestPurgeClosedEphemeralsRecordsWhatItWillRemove(t *testing.T) {
 		t.Fatalf("PurgeClosedEphemerals() = %v", err)
 	}
 	if purged != 2 {
-		t.Fatalf("purged = %d, want the count bd reported", purged)
+		t.Fatalf("purged = %d, want the explicitly deleted count", purged)
 	}
 
-	var sawPurge bool
+	var sawDelete bool
 	for _, c := range calls() {
-		if strings.Contains(c, "purge") {
-			sawPurge = true
+		if strings.Contains(c, "delete") {
+			sawDelete = true
 		}
 	}
-	if !sawPurge {
-		t.Fatal("no bd purge was issued")
+	if !sawDelete {
+		t.Fatal("no explicit bd delete was issued")
 	}
 
 	planned := gcPlannedRecord(t, eventsPath)
@@ -116,7 +117,7 @@ func TestPurgeClosedEphemeralsRecordsWhatItWillRemove(t *testing.T) {
 		t.Errorf("db = %v, want ccm", planned["db"])
 	}
 	if planned["predicted"] != true {
-		t.Error("the record must say it is a prediction: bd applies its own definition of closed-ephemeral")
+		t.Error("the record must say it is a prediction")
 	}
 	named := fmt.Sprint(planned["wisps"])
 	for _, want := range []string{"cl-wisp-aaa", "mol-polecat-work step 1", "cl-wisp-bbb"} {
@@ -147,7 +148,7 @@ func TestPurgeClosedEphemeralsDoesNotPurgeWhenItCannotRecord(t *testing.T) {
 		t.Errorf("error = %v, want it to name the unwritable record", err)
 	}
 	for _, c := range calls() {
-		if strings.Contains(c, "purge") {
+		if strings.Contains(c, "delete") {
 			t.Errorf("ran %q with no durable record of what went", c)
 		}
 	}
@@ -186,6 +187,165 @@ func TestPurgeClosedEphemeralsDryRunRecordsNothing(t *testing.T) {
 	}
 }
 
+func TestPlanClosedEphemeralPurgeKeepsComplianceMail(t *testing.T) {
+	old := "2020-01-01T00:00:00Z"
+	fakeBD(t, fmt.Sprintf(`[
+  {"id":"ccm-mail","title":"compliance mail","status":"closed","ephemeral":true,"labels":["from:crew/compliance"],"closed_at":%q},
+  {"id":"ccm-plain","title":"plain","status":"closed","ephemeral":true,"closed_at":%q}
+]`, old, old))
+	doomed, excluded, err := planClosedEphemeralPurge(os.Environ(), t.TempDir())
+	if err != nil {
+		t.Fatalf("planClosedEphemeralPurge() = %v", err)
+	}
+	if excluded.ComplianceCount() != 1 || len(doomed) != 1 || doomed[0].ID != "ccm-plain" {
+		t.Fatalf("doomed=%v excluded=%+v, want only plain wisp and one compliance keep", doomed, excluded)
+	}
+}
+
+// failingQueryBD installs a `bd` whose query (the candidate listing) fails
+// outright, but whose purge would otherwise succeed — gt-12f round 2: a
+// listing failure must abort the purge, never fall through to treating "could
+// not list" the same as "nothing protected" and running bd's own blanket
+// purge anyway.
+func failingQueryBD(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in
+  *query*) echo 'dolt: connection refused' >&2; exit 1 ;;
+  *delete*) echo 'unexpected delete' >&2; exit 1 ;;
+  *) : ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPurgeClosedEphemeralsAbortsWhenListingFails(t *testing.T) {
+	townRoot, eventsPath := gcTown(t)
+	failingQueryBD(t)
+
+	purged, err := PurgeClosedEphemerals(townRoot, "ccm", "gt dolt sync --gc: pre-push purge", false)
+	if err == nil {
+		t.Fatal("PurgeClosedEphemerals() = nil, want an error: a listing failure must abort the purge")
+	}
+	if purged != 0 {
+		t.Errorf("purged = %d, want 0 — no delete may run when the candidate list could not be read", purged)
+	}
+	if _, statErr := os.Stat(eventsPath); statErr == nil {
+		t.Error("a purge that never ran must not leave a planned or completed record")
+	}
+}
+
+// TestPurgeClosedEphemeralsConfirmedEmptyIsNotAnError covers the one non-array
+// bd output this is allowed to treat as success: the "No issues found." prose
+// bd prints for a genuinely empty result set. This is the control for
+// TestPurgeClosedEphemeralsAbortsWhenListingFails — the fail-closed fix must
+// not turn a real empty database into a false error.
+func TestPurgeClosedEphemeralsConfirmedEmptyIsNotAnError(t *testing.T) {
+	townRoot, _ := gcTown(t)
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in
+  *query*) echo 'No issues found.' ;;
+  *delete*) echo 'unexpected delete' >&2; exit 1 ;;
+  *) : ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	purged, err := PurgeClosedEphemerals(townRoot, "ccm", "gt dolt sync --gc: pre-push purge", false)
+	if err != nil {
+		t.Fatalf("PurgeClosedEphemerals() = %v, want a confirmed-empty result treated as success", err)
+	}
+	if purged != 0 {
+		t.Errorf("purged = %d, want 0", purged)
+	}
+}
+
+func TestConfirmedNoIssuesFoundMatchesRealBDShowShape(t *testing.T) {
+	if !confirmedNoIssuesFound(1, []byte(`{"error":"no issues found matching the provided IDs"}`), []byte("no issue found\n")) {
+		t.Fatal("real bd all-missing output was not recognized")
+	}
+	for _, tc := range []struct {
+		stdout   string
+		stderr   string
+		exitCode int
+	}{
+		{`{"error":"database unavailable"}`, "no issue found", 1},
+		{`{"error":"no issues found matching the provided IDs"}`, "dolt unavailable", 1},
+		{`[]`, "no issue found", 1},
+		{`{"error":"no issues found matching the provided IDs"}`, "no issue found", 0},
+	} {
+		if confirmedNoIssuesFound(tc.exitCode, []byte(tc.stdout), []byte(tc.stderr)) {
+			t.Fatalf("unexpected confirmed-gone result for stdout=%q stderr=%q", tc.stdout, tc.stderr)
+		}
+	}
+}
+
+// survivorBD simulates the cl-wisp-0u30 shape: bd purge reports success, but
+// the wisp is still present when re-queried afterward. The post-delete
+// verification this backs must name the survivor rather than trusting the
+// reported count.
+func survivorBD(t *testing.T, queryJSON string) {
+	t.Helper()
+	binDir := t.TempDir()
+	dataPath := filepath.Join(binDir, "wisps.json")
+	if err := os.WriteFile(dataPath, []byte(queryJSON), 0644); err != nil {
+		t.Fatalf("write fake wisp data: %v", err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *query*) cat %q ;;
+  *delete*) : ;;
+  *show*) echo '[{"id":"cl-wisp-aaa"}]' ;;
+  *) : ;;
+esac
+`, dataPath)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPurgeClosedEphemeralsFlagsASurvivor(t *testing.T) {
+	townRoot, eventsPath := gcTown(t)
+	survivorBD(t, gcWispJSON)
+
+	purged, err := PurgeClosedEphemerals(townRoot, "ccm", "gt dolt sync --gc: pre-push purge", false)
+	if err != nil {
+		t.Fatalf("PurgeClosedEphemerals() = %v", err)
+	}
+	if purged != 2 {
+		t.Fatalf("purged = %d, want the explicit delete count (the survivor is flagged, not treated as a hard failure)", purged)
+	}
+
+	completed := gcRecordWithPhase(t, eventsPath, "partial")
+	if completed == nil {
+		t.Fatal("no partial record")
+	}
+	survived := fmt.Sprint(completed["survived_purge"])
+	if !strings.Contains(survived, "cl-wisp-aaa") {
+		t.Errorf("completed record survived_purge = %v, want cl-wisp-aaa named (the cl-wisp-0u30 shape)", completed["survived_purge"])
+	}
+	failed := fmt.Sprint(completed["failed"])
+	if !strings.Contains(failed, "cl-wisp-aaa") {
+		t.Errorf("completed record failed = %v, want cl-wisp-aaa named as a failure", completed["failed"])
+	}
+	removed := fmt.Sprint(completed["wisps"])
+	if strings.Contains(removed, "cl-wisp-aaa") {
+		t.Errorf("partial record wisps = %v names a survivor as deleted", completed["wisps"])
+	}
+	if !strings.Contains(removed, "cl-wisp-bbb") {
+		t.Errorf("partial record wisps = %v, want the independently verified deletion named", completed["wisps"])
+	}
+}
+
 // failingBD installs a `bd` that answers the wisp query but fails the purge.
 func failingBD(t *testing.T, queryJSON string) {
 	t.Helper()
@@ -197,7 +357,7 @@ func failingBD(t *testing.T, queryJSON string) {
 	script := fmt.Sprintf(`#!/bin/sh
 case "$*" in
   *query*) cat %q ;;
-  *purge*) echo 'dolt: connection refused' >&2; exit 1 ;;
+  *delete*) echo 'dolt: connection refused' >&2; exit 1 ;;
   *) : ;;
 esac
 `, dataPath)

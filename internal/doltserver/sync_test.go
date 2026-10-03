@@ -176,8 +176,15 @@ if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
   printf 'bd version\n'
   exit 0
 fi
-if [ "$1" = "--allow-stale" ] && [ "$2" = "purge" ]; then
-  printf '{"purged_count":3}\n'
+if [ "$1" = "--allow-stale" ] && [ "$2" = "query" ]; then
+  printf '[{"id":"gt-wisp-a","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},{"id":"gt-wisp-b","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"},{"id":"gt-wisp-c","title":"old","status":"closed","ephemeral":true,"closed_at":"2020-01-01T00:00:00Z"}]\n'
+  exit 0
+fi
+if [ "$1" = "delete" ]; then
+  exit 0
+fi
+if [ "$1" = "show" ]; then
+  printf '[]\n'
   exit 0
 fi
 printf 'unexpected args: %s\n' "$*" >&2
@@ -213,7 +220,7 @@ exit 2
 	log := string(data)
 	for _, want := range []string{
 		"args=--allow-stale version",
-		"args=--allow-stale purge --json",
+		"args=delete --force gt-wisp-a gt-wisp-b gt-wisp-c",
 		"BEADS_DIR=" + beadsDir,
 		"BEADS_DOLT_SERVER_DATABASE=gastown",
 		"BEADS_DOLT_SERVER_HOST=127.0.0.2",

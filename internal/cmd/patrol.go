@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wispaudit"
 )
@@ -71,20 +72,22 @@ func init() {
 
 // PatrolDigest represents the aggregated daily patrol report.
 type PatrolDigest struct {
-	Date         string                   `json:"date"`
-	TotalCycles  int                      `json:"total_cycles"`
-	ByRole       map[string]int           `json:"by_role"`        // deacon, witness, refinery
-	Cycles       []PatrolCycleEntry       `json:"cycles"`
+	Date        string             `json:"date"`
+	TotalCycles int                `json:"total_cycles"`
+	ByRole      map[string]int     `json:"by_role"` // deacon, witness, refinery
+	Cycles      []PatrolCycleEntry `json:"cycles"`
 }
 
 // PatrolCycleEntry represents a single patrol cycle in the digest.
 type PatrolCycleEntry struct {
-	ID          string    `json:"id"`
-	Role        string    `json:"role"`         // deacon, witness, refinery
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	ClosedAt    time.Time `json:"closed_at,omitempty"`
+	ID           string    `json:"id"`
+	Role         string    `json:"role"` // deacon, witness, refinery
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	CreatedAt    time.Time `json:"created_at"`
+	ClosedAt     time.Time `json:"closed_at,omitempty"`
+	Labels       []string  `json:"labels,omitempty"`
+	CommentCount int       `json:"comment_count,omitempty"`
 }
 
 // runPatrolDigest aggregates patrol cycle digests into a daily digest bead.
@@ -156,6 +159,13 @@ func runPatrolDigest(cmd *cobra.Command, args []string) error {
 		for _, role := range roles {
 			fmt.Printf("    %s: %d cycles\n", role, digest.ByRole[role])
 		}
+		// The digest cleanup is destructive outside dry-run. Name the exact
+		// source wisps here so the preview is an auditable prediction rather
+		// than a count that can conceal a different delete set.
+		fmt.Printf("  Source wisps to delete:\n")
+		for _, cycle := range cycles {
+			fmt.Printf("    %s  %s\n", cycle.ID, cycle.Title)
+		}
 		return nil
 	}
 
@@ -202,13 +212,15 @@ func queryPatrolDigests(targetDate time.Time) ([]PatrolCycleEntry, error) {
 	}
 
 	var issues []struct {
-		ID          string    `json:"id"`
-		Title       string    `json:"title"`
-		Description string    `json:"description"`
-		Status      string    `json:"status"`
-		CreatedAt   time.Time `json:"created_at"`
-		ClosedAt    time.Time `json:"closed_at"`
-		Ephemeral   bool      `json:"ephemeral"`
+		ID           string    `json:"id"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		Status       string    `json:"status"`
+		CreatedAt    time.Time `json:"created_at"`
+		ClosedAt     time.Time `json:"closed_at"`
+		Ephemeral    bool      `json:"ephemeral"`
+		Labels       []string  `json:"labels,omitempty"`
+		CommentCount int       `json:"comment_count,omitempty"`
 	}
 
 	if err := json.Unmarshal(listOutput, &issues); err != nil {
@@ -239,12 +251,14 @@ func queryPatrolDigests(targetDate time.Time) ([]PatrolCycleEntry, error) {
 		role := extractPatrolRole(issue.Title)
 
 		patrolDigests = append(patrolDigests, PatrolCycleEntry{
-			ID:          issue.ID,
-			Role:        role,
-			Title:       issue.Title,
-			Description: issue.Description,
-			CreatedAt:   issue.CreatedAt,
-			ClosedAt:    issue.ClosedAt,
+			ID:           issue.ID,
+			Role:         role,
+			Title:        issue.Title,
+			Description:  issue.Description,
+			CreatedAt:    issue.CreatedAt,
+			ClosedAt:     issue.ClosedAt,
+			Labels:       issue.Labels,
+			CommentCount: issue.CommentCount,
 		})
 	}
 
@@ -376,12 +390,47 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 		return 0, nil
 	}
 
-	// Collect IDs to delete
+	// Collect IDs to delete. Patrol digests are not expected to carry the
+	// merge-request label or compliance comments — they're a structurally
+	// different wisp_type — but gt-12f round 2 asks every delete path to
+	// apply the same exclusion, not just the ones known to need it, so a
+	// future change that lets a digest carry a comment doesn't silently
+	// reopen this one.
 	var idsToDelete []string
 	doomed := make([]wispaudit.Wisp, 0, len(cycles))
+	var kept int
 	for _, cycle := range cycles {
+		closedAt, ok := patrolDigestClosedAt(cycle)
+		if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+			kept++
+			continue
+		}
+		if wispaudit.HasProtectedLabel(cycle.Labels) {
+			kept++
+			continue
+		}
+		if wispaudit.HasComplianceMailAuthorLabel(cycle.Labels) {
+			kept++
+			continue
+		}
+		if cycle.CommentCount > 0 {
+			out, err := exec.Command("bd", "comments", cycle.ID, "--json").Output()
+			if err != nil {
+				kept++
+				continue // unreadable: fail closed, keep it
+			}
+			protected, readable, count := wispaudit.CommentsProtectedCount(out)
+			if !readable || count != cycle.CommentCount || protected {
+				kept++
+				continue
+			}
+		}
 		idsToDelete = append(idsToDelete, cycle.ID)
 		doomed = append(doomed, wispaudit.Wisp{ID: cycle.ID, Title: cycle.Title})
+	}
+
+	if len(doomed) == 0 {
+		return 0, nil
 	}
 
 	scope := "digest_date:" + targetDate.UTC().Format("2006-01-02")
@@ -390,10 +439,37 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	// database, so GT_RIG is the best name available for where these went. It
 	// can be empty, and an empty db field is honest about that.
 	db := os.Getenv("GT_RIG")
-	if err := wispaudit.Plan(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil); err != nil {
+	var extra map[string]interface{}
+	if kept > 0 {
+		extra = map[string]interface{}{"kept_protected": kept}
+	}
+	if err := wispaudit.Plan(actor, wispaudit.PathPatrolDigest, scope, db, doomed, extra); err != nil {
 		return 0, fmt.Errorf("not deleting %d patrol digests: the deletion could not be recorded first: %w",
 			len(doomed), err)
 	}
+
+	// The list above is only a plan. Re-read the whole candidate set once,
+	// immediately before deletion: a reopened wisp, fresh close, or newly
+	// applied protection must be retained. This is deliberately batched rather
+	// than one bd query per id; the prior O(n²) recheck overloaded Dolt.
+	eligible, changed, recheckErr := recheckPatrolDigestCandidates(doomed)
+	if recheckErr != nil {
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil,
+			[]string{"pre-delete recheck: " + recheckErr.Error()}, extra)
+		return 0, fmt.Errorf("rechecking patrol digests before delete: %w", recheckErr)
+	}
+	if len(changed) > 0 {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["kept_after_recheck"] = changed
+	}
+	if len(eligible) == 0 {
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil, changed, extra)
+		return 0, fmt.Errorf("all patrol digest candidates changed before delete")
+	}
+	doomed = eligible
+	idsToDelete = wispaudit.IDs(doomed)
 
 	// Delete in batch
 	deleteArgs := append([]string{"delete", "--force"}, idsToDelete...)
@@ -402,7 +478,95 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 		return 0, fmt.Errorf("deleting patrol digests: %w", err)
 	}
 
-	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil, nil)
+	workDir, err := os.Getwd()
+	if err != nil {
+		return 0, fmt.Errorf("getting patrol digest workdir for verification: %w", err)
+	}
+	verified, survivors, verifyErr := confirmWispsGone(beads.New(workDir), doomed)
+	if verifyErr != nil {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["verify_error"] = verifyErr.Error()
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil,
+			[]string{"post-delete verification: " + verifyErr.Error()}, extra)
+		return 0, fmt.Errorf("verifying patrol digest deletion: %w", verifyErr)
+	}
+	if len(survivors) > 0 {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["survived_purge"] = survivors
+		failures := make([]string, 0, len(survivors))
+		for _, id := range survivors {
+			failures = append(failures, id+": still present after delete")
+		}
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, verified, failures, extra)
+		return len(verified), fmt.Errorf("%d patrol digest(s) survived deletion", len(survivors))
+	}
 
-	return len(idsToDelete), nil
+	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, verified, nil, extra)
+
+	return len(verified), nil
+}
+
+// recheckPatrolDigestCandidates performs one current-state read for the
+// entire delete set. Any missing or no-longer-plain closed row is retained;
+// absence of evidence is not permission to delete.
+func recheckPatrolDigestCandidates(candidates []wispaudit.Wisp) ([]wispaudit.Wisp, []string, error) {
+	if len(candidates) == 0 {
+		return nil, nil, nil
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := beads.New(workDir).Run(append([]string{"show", "--json"}, wispaudit.IDs(candidates)...)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	var current []struct {
+		ID           string    `json:"id"`
+		Status       string    `json:"status"`
+		ClosedAt     time.Time `json:"closed_at"`
+		Labels       []string  `json:"labels"`
+		CommentCount int       `json:"comment_count"`
+	}
+	if err := json.Unmarshal(extractJSONArray(out), &current); err != nil {
+		return nil, nil, fmt.Errorf("parse batched bd show: %w", err)
+	}
+	byID := make(map[string]struct {
+		Status       string
+		ClosedAt     time.Time
+		Labels       []string
+		CommentCount int
+	}, len(current))
+	for _, row := range current {
+		byID[row.ID] = struct {
+			Status       string
+			ClosedAt     time.Time
+			Labels       []string
+			CommentCount int
+		}{row.Status, row.ClosedAt, row.Labels, row.CommentCount}
+	}
+	cutoff := time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)
+	eligible := make([]wispaudit.Wisp, 0, len(candidates))
+	var changed []string
+	for _, candidate := range candidates {
+		row, found := byID[candidate.ID]
+		if !found || row.Status != "closed" || row.ClosedAt.IsZero() || row.ClosedAt.After(cutoff) ||
+			row.CommentCount != 0 || wispaudit.HasProtectedLabel(row.Labels) || wispaudit.HasComplianceMailAuthorLabel(row.Labels) {
+			changed = append(changed, candidate.ID+": changed or protected before delete")
+			continue
+		}
+		eligible = append(eligible, candidate)
+	}
+	return eligible, changed, nil
+}
+
+func patrolDigestClosedAt(cycle PatrolCycleEntry) (time.Time, bool) {
+	if cycle.ClosedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return cycle.ClosedAt.UTC(), true
 }

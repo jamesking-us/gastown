@@ -1085,6 +1085,65 @@ func TestHasPendingMRCleanupWispFailsClosed(t *testing.T) {
 	}
 }
 
+// gt-12f round 2: an agent bead that cannot be read (Dolt hiccup, timeout,
+// bad JSON) must not be treated as "no active MR". getAgentMRContext used to
+// collapse both cases to ("", ""), and an empty active_mr makes
+// AssessActiveMR report Pending=false — "safe to nuke" — exactly when the
+// honest answer is "could not check".
+func TestHasPendingMRFailsClosedWhenAgentBeadUnreadable(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "list":
+				return "[]", nil
+			case "show":
+				if args[1] == "gt-agent" {
+					return "", errors.New("dolt: connection refused")
+				}
+			}
+			return "", errors.New("not found")
+		},
+		func(args []string) error { return nil },
+	)
+
+	if got := hasPendingMR(bd, workDir, "gastown", "nux", "gt-agent"); !got {
+		t.Fatalf("hasPendingMR() = false, want true — an unreadable agent bead must fail closed, not be read as 'no active MR'")
+	}
+}
+
+// Paired negative control for the test above: an agent bead that reads
+// cleanly and legitimately carries no active_mr must still report "not
+// pending" — the fail-closed fix must not turn every polecat into an
+// unreleasable nuke target.
+func TestHasPendingMRFalseWhenAgentBeadReadsCleanWithNoActiveMR(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "list":
+				return "[]", nil
+			case "show":
+				if args[1] == "gt-agent" {
+					return `[{"active_mr":"","description":""}]`, nil
+				}
+			}
+			return "", errors.New("not found")
+		},
+		func(args []string) error { return nil },
+	)
+
+	if got := hasPendingMR(bd, workDir, "gastown", "nux", "gt-agent"); got {
+		t.Fatalf("hasPendingMR() = true, want false — a cleanly-read agent bead with no active_mr has nothing pending")
+	}
+}
+
 func TestTerminalSafeDoneSnapshot(t *testing.T) {
 	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
 	bd, _ := mockBd(
