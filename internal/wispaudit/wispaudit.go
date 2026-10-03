@@ -52,6 +52,11 @@ const (
 	PathMaintain = "gt maintain: pre-push purge"
 	// PathReaper is the reaper purge, from the daemon patrol or gt reaper purge.
 	PathReaper = "reaper: purge closed wisps"
+	// PathReaperMail is the reaper purging old closed mail from `issues`. Mail
+	// rows are not in dolt_ignore (they're in the committed `issues` table), so
+	// this one has Dolt history behind it — but gt-12f round 2 still asks for
+	// at least an audit record here, for consistency with every other deleter.
+	PathReaperMail = "reaper: purge old mail"
 	// PathPatrolDigest is gt patrol removing a day's digest wisps.
 	PathPatrolDigest = "gt patrol: digest cleanup"
 )
@@ -63,6 +68,7 @@ const (
 const (
 	phasePlanned   = "planned"
 	phaseCompleted = "completed"
+	phasePartial   = "partial"
 )
 
 // Wisp is one wisp in a deletion record: enough to know what was lost.
@@ -120,6 +126,17 @@ func Plan(actor, path, scope, db string, wisps []Wisp, extra map[string]interfac
 // for callers that want to mention it; nothing should abort on it.
 func Completed(actor, path, scope, db string, wisps []Wisp, failures []string, extra map[string]interface{}) error {
 	payload := events.WispPurgePayload(phaseCompleted, path, scope, db, wispPayload(wisps), extra)
+	if len(failures) > 0 {
+		payload["failed"] = failures
+	}
+	return events.LogAudit(events.TypeWispPurge, actor, payload)
+}
+
+// Partial records an attempted purge whose outcome could not be fully verified.
+// It must not be represented as completed: survivors and verifier failures are
+// evidence that the planned set did not necessarily go away.
+func Partial(actor, path, scope, db string, wisps []Wisp, failures []string, extra map[string]interface{}) error {
+	payload := events.WispPurgePayload(phasePartial, path, scope, db, wispPayload(wisps), extra)
 	if len(failures) > 0 {
 		payload["failed"] = failures
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -20,6 +21,8 @@ func compactWisp(id, title string) *compactIssue {
 	w.ID = id
 	w.Title = title
 	w.WispType = "patrol"
+	w.Status = "closed"
+	w.ClosedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
 	return w
 }
 

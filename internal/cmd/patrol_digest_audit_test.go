@@ -28,6 +28,7 @@ func listingBD(t *testing.T, listJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *list*) cat %q ;;
+	*show*) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath)
@@ -52,11 +53,12 @@ esac
 }
 
 func digestFixture(day time.Time) string {
-	ts := day.UTC().Format("2006-01-02T15:04:05Z")
+	created := day.UTC().Format("2006-01-02T15:04:05Z")
+	closed := "2020-01-01T00:00:00Z"
 	return fmt.Sprintf(`[
   {"id":"hq-wisp-d1","title":"Digest: mol-deacon-patrol","description":"cycle notes","status":"closed","ephemeral":true,"created_at":%q,"closed_at":%q},
   {"id":"hq-wisp-d2","title":"Digest: mol-witness-patrol","description":"cycle notes","status":"closed","ephemeral":true,"created_at":%q,"closed_at":%q}
-]`, ts, ts, ts, ts)
+]`, created, closed, created, closed)
 }
 
 func TestDeletePatrolDigestsRecordsThemFirst(t *testing.T) {

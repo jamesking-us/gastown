@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,6 +128,13 @@ type PurgeResult struct {
 	MailPurged  int       `json:"mail_purged"`
 	DryRun      bool      `json:"dry_run,omitempty"`
 	Anomalies   []Anomaly `json:"anomalies,omitempty"`
+
+	// WispsPurgedIDs and MailPurgedIDs name the exact candidates on a dry run,
+	// capped at maxPurgePreviewIDs. gt-12f: a count alone is not "--dry-run
+	// shows the purge" — only an id list lets a caller tell what was found
+	// deletable before anything acts on it. Empty on a real (non-dry-run) purge.
+	WispsPurgedIDs []string `json:"wisps_purged_ids,omitempty"`
+	MailPurgedIDs  []string `json:"mail_purged_ids,omitempty"`
 }
 
 // ClosedEntry records an individual issue closure with details for logging.
@@ -565,27 +573,130 @@ func closeWispsInBatches(ctx context.Context, runner sqlRunner, idQuery string, 
 
 // Purge deletes old closed wisps and mail from a database.
 func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
+	const minimumWispPurgeAge = 7 * 24 * time.Hour
+	if purgeAge < minimumWispPurgeAge {
+		return nil, fmt.Errorf("purge age %s is below the mandatory minimum %s", purgeAge, minimumWispPurgeAge)
+	}
+	if mailDeleteAge < minimumWispPurgeAge {
+		return nil, fmt.Errorf("mail delete age %s is below the mandatory minimum %s", mailDeleteAge, minimumWispPurgeAge)
+	}
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.
-	purged, anomalies, err := purgeClosedWisps(db, dbName, purgeAge, dryRun)
+	purged, ids, anomalies, err := purgeClosedWisps(db, dbName, purgeAge, dryRun)
 	if err != nil {
 		return nil, fmt.Errorf("purge wisps: %w", err)
 	}
 	result.WispsPurged = purged
+	result.WispsPurgedIDs = ids
 	result.Anomalies = append(result.Anomalies, anomalies...)
 
 	// Purge old mail.
-	mailPurged, err := purgeOldMail(db, dbName, mailDeleteAge, dryRun)
+	mailPurged, mailIDs, err := purgeOldMail(db, dbName, mailDeleteAge, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("purge mail: %w", err)
 	}
 	result.MailPurged = mailPurged
+	result.MailPurgedIDs = mailIDs
 
 	return result, nil
 }
 
-func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
+// protectedWispExclusionSQL excludes gt-12f/cl-kf00 protected beads from an
+// unconditional, age-based wisp purge: a bead labelled gt:merge-request, or
+// any bead carrying a comment from a compliance seat. Matched on the label
+// and on the comment author column — never on a marker string in title or
+// description text, which a rephrase can miss. If wisp_labels or
+// wisp_comments cannot be queried (e.g. missing on a not-yet-migrated
+// database), the surrounding SELECT errors and purgeClosedWisps aborts rather
+// than purging unprotected — failing closed, not open.
+const protectedWispExclusionSQL = ` AND w.id NOT IN (SELECT issue_id FROM wisp_labels WHERE label = 'gt:merge-request')
+  AND w.id NOT IN (
+    SELECT issue_id FROM wisp_comments
+    WHERE author IN ('crew/compliance', 'crew/compliance_b')
+       OR author LIKE '%/crew/compliance'
+       OR author LIKE '%/crew/compliance_b'
+  )`
+
+// closedWispsIDQuery builds the batch-delete candidate query for
+// purgeClosedWisps. It is a plain concatenation, never fmt.Sprintf, because
+// protectedWispExclusionSQL's LIKE patterns ('%/crew/compliance') contain
+// literal '%' characters that fmt.Sprintf consumes as format verbs — the bug
+// that produced "%!/(int=1000)" and "LIMIT %!d(MISSING)" in the query actually
+// sent to Dolt (gt-12f round 2: go vet caught it as an invalid format string;
+// the test for this query must build it the same way, not re-embed the bug).
+func closedWispsIDQuery(limit int) string {
+	return "SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?" +
+		protectedWispExclusionSQL +
+		" LIMIT " + strconv.Itoa(limit)
+}
+
+// maxPurgePreviewIDs caps how many candidate ids a dry run names explicitly.
+// gt-12f requires the list, not just a count, but an unbounded list on a
+// database with thousands of closed wisps is not legible output.
+const maxPurgePreviewIDs = 500
+
+// previewClosedWispIDs returns up to maxPurgePreviewIDs ids a real purge would
+// delete, for dry-run callers. It shares closedWispsIDQuery with the real
+// delete path so a preview cannot name a different set than the one that
+// would actually go.
+func previewClosedWispIDs(ctx context.Context, db *sql.DB, cutoff time.Time) ([]string, error) {
+	rows, err := db.QueryContext(ctx, closedWispsIDQuery(maxPurgePreviewIDs), cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// verifyWispsGone re-queries ids after a purge and reports which are still
+// present. A reported RowsAffected count is not the same as a row being gone
+// (the cl-wisp-0u30 shape: a wisp named in 202 "completed" purge events that
+// was never actually removed) — this is the check that would have caught it.
+// sqlReadWriter is satisfied by both *sql.DB and a pinned *sql.Conn. The
+// latter is required when a purge changes connection-local transaction state:
+// planning, deletion, and verification must observe one connection.
+type sqlReadWriter interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func verifyWispsGone(ctx context.Context, db sqlReadWriter, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := "SELECT id FROM wisps WHERE id IN (" + strings.Join(placeholders, ",") + ")" //nolint:gosec // G201: placeholders only
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var survivors []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return survivors, err
+		}
+		survivors = append(survivors, id)
+	}
+	return survivors, rows.Err()
+}
+
+func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun bool) (int, []string, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -593,13 +704,15 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	var anomalies []Anomaly
 
 	// Digest: count by wisp_type.
-	// No parent check — closed wisps past the delete age are unconditionally purgeable.
+	// No parent check — closed wisps past the delete age are unconditionally purgeable
+	// (apart from the protected-bead exclusion below).
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m)
 	// query cost with 1800+ closed wisps, leading to CPU spikes and timeouts (gt-wvd2).
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?" +
+		protectedWispExclusionSQL + " GROUP BY wtype"
 	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff)
 	if err != nil {
-		return 0, nil, fmt.Errorf("digest query: %w", err)
+		return 0, nil, nil, fmt.Errorf("digest query: %w", err)
 	}
 	digestTotal := 0
 	for rows.Next() {
@@ -607,31 +720,45 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		var cnt int
 		if err := rows.Scan(&wtype, &cnt); err != nil {
 			rows.Close()
-			return 0, nil, fmt.Errorf("digest scan: %w", err)
+			return 0, nil, nil, fmt.Errorf("digest scan: %w", err)
 		}
 		digestTotal += cnt
 	}
 	rows.Close()
 
 	if digestTotal == 0 {
-		return 0, anomalies, nil
+		return 0, nil, anomalies, nil
 	}
 
 	if dryRun {
-		return digestTotal, anomalies, nil
+		previewIDs, previewErr := previewClosedWispIDs(ctx, db, deleteCutoff)
+		if previewErr != nil {
+			anomalies = append(anomalies, Anomaly{
+				Type:    "dry_run_preview_failed",
+				Message: fmt.Sprintf("could not list candidate ids: %v", previewErr),
+			})
+		}
+		return digestTotal, previewIDs, anomalies, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return 0, nil, fmt.Errorf("disable autocommit: %w", err)
+	// @@autocommit is connection-local. Pin the entire mutating sequence so
+	// the planned IDs, DELETEs, verification read, and COMMIT cannot hop
+	// between pooled connections and falsely certify rows from another view.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("acquire purge connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+		return 0, nil, nil, fmt.Errorf("disable autocommit: %w", err)
 	}
 	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
-	// Batch delete — simple status+age filter, no parent check needed for purge.
-	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
-		DefaultBatchSize)
+	// Batch delete — simple status+age filter plus the protected-bead
+	// exclusion above; no parent check needed for purge.
+	idQuery := closedWispsIDQuery(DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 
 	// This is the largest wisp deleter in the tree and the one behind the 1449
@@ -644,29 +771,44 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		// `gt reaper purge` at a terminal — and GT_ROLE names the agent
 		// session when there is one. Neither may be labelled as the other.
 		actor: wispaudit.Actor("reaper"),
+		path:  wispaudit.PathReaper,
 		scope: "closed_at<" + deleteCutoff.Format(time.RFC3339),
 		db:    dbName,
 	}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
-	if totalDeleted > 0 {
-		deletionLog.completed(totalDeleted)
-	}
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
 	if err != nil {
-		return totalDeleted, anomalies, err
+		return totalDeleted, nil, anomalies, err
 	}
 
 	if totalDeleted > 0 {
 		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			anomalies = append(anomalies, Anomaly{
 				Type:    "sql_commit_failed",
 				Message: fmt.Sprintf("sql commit after purge failed: %v", err),
 			})
-			return totalDeleted, anomalies, nil
+			return totalDeleted, nil, anomalies, nil
 		}
+		// A completion receipt is evidence of a committed delete, not of a
+		// transaction that may still roll back. Verify after COMMIT, on this
+		// same pinned connection, before closing the record.
+		verifiedGone := deletionLog.planned
+		var verificationFailures []string
+		if survivors, verifyErr := verifyWispsGone(ctx, conn, wispaudit.IDs(deletionLog.planned)); verifyErr != nil {
+			anomalies = append(anomalies, Anomaly{Type: "purge_verify_failed", Message: fmt.Sprintf("could not confirm deletion: %v", verifyErr)})
+			verifiedGone = nil
+			verificationFailures = append(verificationFailures, "post-commit verification: "+verifyErr.Error())
+		} else if len(survivors) > 0 {
+			anomalies = append(anomalies, Anomaly{Type: "purge_survivors", Message: fmt.Sprintf("still present after purge: %s", strings.Join(survivors, ", ")), Count: len(survivors)})
+			verifiedGone = wispsWithoutIDs(verifiedGone, survivors)
+			for _, id := range survivors {
+				verificationFailures = append(verificationFailures, id+": still present after purge")
+			}
+		}
+		deletionLog.completed(verifiedGone, verificationFailures, map[string]interface{}{"deleted_rows": totalDeleted})
 		commitMsg := fmt.Sprintf("reaper: purge %d closed wisps from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// Non-fatal — log but continue.
 			anomalies = append(anomalies, Anomaly{
 				Type:    "dolt_commit_failed",
@@ -675,27 +817,39 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		}
 	}
 
-	return totalDeleted, anomalies, nil
+	return totalDeleted, nil, anomalies, nil
 }
 
 // wispDeletionLog is the reaper's half of the one durable wisp deletion record
 // (hq-6ewp). Every batch is named in <town>/.events.jsonl before it is deleted,
 // and a batch whose record will not write is not deleted.
 //
-// It accumulates what it planned so the closing record can name the whole set
-// rather than just count it — the question asked afterwards is always "which
-// wisps went", and by then there is nothing left to ask.
+// It accumulates what it planned so verification can distinguish the rows it
+// proved absent from survivors. The closing record names only the former.
 type wispDeletionLog struct {
-	actor   string
-	scope   string
-	db      string
-	planned []wispaudit.Wisp
+	actor string
+	// path names the deleter for the audit record (wispaudit.Path*). Explicit
+	// per log rather than hardcoded, because this type now backs more than one
+	// deletion path (wisps and, separately, old mail — gt-12f round 2 item 4:
+	// "reaper purgeOldMail: at least an audit record").
+	path  string
+	scope string
+	db    string
+	// titleLookup resolves ids to titles for the record. Defaults to
+	// lookupWispTitles (the `wisps` table) when nil; purgeOldMail supplies one
+	// that reads `issues` instead.
+	titleLookup func(context.Context, sqlReadWriter, []string) []wispaudit.Wisp
+	planned     []wispaudit.Wisp
 }
 
 // planBatch records one batch and reports whether the delete may proceed.
-func (l *wispDeletionLog) planBatch(ctx context.Context, db *sql.DB, ids []string) error {
-	batch := lookupWispTitles(ctx, db, ids)
-	if err := wispaudit.Plan(l.actor, wispaudit.PathReaper, l.scope, l.db, batch, nil); err != nil {
+func (l *wispDeletionLog) planBatch(ctx context.Context, db sqlReadWriter, ids []string) error {
+	lookup := l.titleLookup
+	if lookup == nil {
+		lookup = lookupWispTitles
+	}
+	batch := lookup(ctx, db, ids)
+	if err := wispaudit.Plan(l.actor, l.path, l.scope, l.db, batch, nil); err != nil {
 		return fmt.Errorf("refusing to delete %d wisps: the deletion could not be recorded first: %w", len(ids), err)
 	}
 	l.planned = append(l.planned, batch...)
@@ -705,16 +859,33 @@ func (l *wispDeletionLog) planBatch(ctx context.Context, db *sql.DB, ids []strin
 // completed writes the closing record. Best-effort: the delete has happened and
 // the planned records already name every id, so a failure here loses the
 // outcome, not the evidence.
-func (l *wispDeletionLog) completed(deleted int) {
-	_ = wispaudit.Completed(l.actor, wispaudit.PathReaper, l.scope, l.db, l.planned, nil,
-		map[string]interface{}{"deleted_rows": deleted})
+func (l *wispDeletionLog) completed(verified []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
+	if len(failures) > 0 {
+		_ = wispaudit.Partial(l.actor, l.path, l.scope, l.db, verified, failures, extra)
+		return
+	}
+	_ = wispaudit.Completed(l.actor, l.path, l.scope, l.db, verified, nil, extra)
+}
+
+func wispsWithoutIDs(wisps []wispaudit.Wisp, excluded []string) []wispaudit.Wisp {
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, id := range excluded {
+		excludedSet[id] = struct{}{}
+	}
+	verified := make([]wispaudit.Wisp, 0, len(wisps))
+	for _, w := range wisps {
+		if _, found := excludedSet[w.ID]; !found {
+			verified = append(verified, w)
+		}
+	}
+	return verified
 }
 
 // lookupWispTitles fills in the titles for a batch of ids. A title is what makes
 // a deletion record legible to a human afterwards, but it is not what makes it
 // valid: if the lookup fails the ids are recorded without titles rather than the
 // batch going unrecorded, because an id-only record still names what was lost.
-func lookupWispTitles(ctx context.Context, db *sql.DB, ids []string) []wispaudit.Wisp {
+func lookupWispTitles(ctx context.Context, db sqlReadWriter, ids []string) []wispaudit.Wisp {
 	fallback := wispaudit.WispsFromIDs(ids)
 	if len(ids) == 0 {
 		return fallback
@@ -752,62 +923,192 @@ func lookupWispTitles(ctx context.Context, db *sql.DB, ids []string) []wispaudit
 	return out
 }
 
-func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
+// lookupMailTitles is purgeOldMail's titleLookup: mail lives in the
+// db-qualified `issues` table, not the bare `wisps` table lookupWispTitles
+// reads, so it needs its own query rather than reusing that one.
+func lookupMailTitles(dbName string) func(context.Context, sqlReadWriter, []string) []wispaudit.Wisp {
+	return func(ctx context.Context, db sqlReadWriter, ids []string) []wispaudit.Wisp {
+		fallback := wispaudit.WispsFromIDs(ids)
+		if len(ids) == 0 {
+			return fallback
+		}
+		placeholders := make([]string, len(ids))
+		args := make([]interface{}, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := fmt.Sprintf("SELECT id, title FROM `%s`.issues WHERE id IN (%s)", dbName, strings.Join(placeholders, ",")) //nolint:gosec // G201: placeholders only; dbName validated by caller
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return fallback
+		}
+		defer rows.Close()
+
+		titles := make(map[string]string, len(ids))
+		for rows.Next() {
+			var id, title string
+			if err := rows.Scan(&id, &title); err != nil {
+				return fallback
+			}
+			titles[id] = title
+		}
+		if err := rows.Err(); err != nil {
+			return fallback
+		}
+		out := make([]wispaudit.Wisp, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, wispaudit.Wisp{ID: id, Title: titles[id]})
+		}
+		return out
+	}
+}
+
+func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, []string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	const minimumMailDeleteAge = 7 * 24 * time.Hour
+	if mailDeleteAge < minimumMailDeleteAge {
+		return 0, nil, fmt.Errorf("mail delete age %s is below the mandatory minimum %s", mailDeleteAge, minimumMailDeleteAge)
+	}
 	mailCutoff := time.Now().UTC().Add(-mailDeleteAge)
+	mailProtection := fmt.Sprintf(" AND i.id NOT IN ("+
+		" SELECT issue_id FROM `%s`.labels"+
+		" WHERE label = 'gt:merge-request'"+
+		" OR label IN ('from:crew/compliance', 'from:crew/compliance_b')"+
+		" OR label LIKE 'from:%%/crew/compliance'"+
+		" OR label LIKE 'from:%%/crew/compliance_b'"+
+		")", dbName)
 
 	countQuery := fmt.Sprintf(
-		"SELECT COUNT(*) FROM `%s`.issues WHERE status = 'closed' AND closed_at < ? AND id IN (SELECT issue_id FROM `%s`.labels WHERE label = 'gt:message')",
-		dbName, dbName)
+		"SELECT COUNT(*) FROM `%s`.issues i WHERE i.status = 'closed' AND i.closed_at < ? AND i.id IN (SELECT issue_id FROM `%s`.labels WHERE label = 'gt:message')",
+		dbName, dbName) + mailProtection
 	var count int
 	if err := db.QueryRowContext(ctx, countQuery, mailCutoff).Scan(&count); err != nil {
 		if isTableNotFound(err) {
-			return 0, nil // issues/labels not on this server
+			return 0, nil, nil // issues/labels not on this server
 		}
-		return 0, fmt.Errorf("count mail: %w", err)
+		return 0, nil, fmt.Errorf("count mail: %w", err)
 	}
 	if count == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
-
-	if dryRun {
-		return count, nil
-	}
-
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return 0, fmt.Errorf("disable autocommit: %w", err)
-	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
 
 	idQuery := fmt.Sprintf(
-		"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message' LIMIT %d",
-		dbName, dbName, DefaultBatchSize)
+		"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message'",
+		dbName, dbName) + mailProtection + fmt.Sprintf(" LIMIT %d", DefaultBatchSize)
+
+	if dryRun {
+		previewQuery := fmt.Sprintf(
+			"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message'",
+			dbName, dbName) + mailProtection + fmt.Sprintf(" LIMIT %d", maxPurgePreviewIDs)
+		rows, err := db.QueryContext(ctx, previewQuery, mailCutoff)
+		if err != nil {
+			return count, nil, nil
+		}
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return count, ids, nil
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return count, ids, fmt.Errorf("preview old mail: %w", err)
+		}
+		return count, ids, nil
+	}
+
+	// autocommit and a transaction view are connection-local. Pin planning,
+	// delete, COMMIT and post-commit verification to one connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("acquire mail purge connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+		return 0, nil, fmt.Errorf("disable autocommit: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
+	}()
+
 	auxTables := []string{"labels", "comments", "events", "dependencies"}
 
-	// No deletion record: mail lives in `issues`, which is NOT in dolt_ignore,
-	// so these rows are committed and readable back with AS OF. The record
-	// exists for the tables that have no history, not for every delete.
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables, nil)
+	// gt-12f round 2: "at least an audit record" even though mail lives in
+	// `issues` (not dolt_ignore) and so has Dolt history behind it — every
+	// deleter in the tree now writes the same record, for consistency with the
+	// ones whose deletes are unrecoverable without it.
+	mailLog := &wispDeletionLog{
+		actor:       wispaudit.Actor("reaper"),
+		path:        wispaudit.PathReaperMail,
+		scope:       "closed_at<" + mailCutoff.Format(time.RFC3339),
+		db:          dbName,
+		titleLookup: lookupMailTitles(dbName),
+	}
+
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, mailCutoff, "issues", auxTables, mailLog.planBatch)
 	if err != nil {
-		return totalDeleted, err
+		return totalDeleted, nil, err
 	}
 
 	if totalDeleted > 0 {
 		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			return totalDeleted, fmt.Errorf("sql commit: %w", err)
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return totalDeleted, nil, fmt.Errorf("sql commit: %w", err)
+		}
+		verified, survivors, verifyErr := verifyMailGone(ctx, conn, dbName, wispaudit.IDs(mailLog.planned))
+		extra := map[string]interface{}{"deleted_rows": totalDeleted}
+		if verifyErr != nil {
+			mailLog.completed(nil, []string{"post-commit verification: " + verifyErr.Error()}, extra)
+		} else if len(survivors) > 0 {
+			extra["survived_purge"] = survivors
+			failures := make([]string, 0, len(survivors))
+			for _, id := range survivors {
+				failures = append(failures, id+": still present after purge")
+			}
+			mailLog.completed(wispsWithoutIDs(mailLog.planned, survivors), failures, extra)
+		} else {
+			mailLog.completed(verified, nil, extra)
 		}
 		commitMsg := fmt.Sprintf("reaper: purge %d old mail from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// Non-fatal.
 		}
 	}
 
-	return totalDeleted, nil
+	return totalDeleted, nil, nil
+}
+
+func verifyMailGone(ctx context.Context, db sqlReadWriter, dbName string, ids []string) ([]wispaudit.Wisp, []string, error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i], args[i] = "?", id
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM `%s`.issues WHERE id IN (%s)", dbName, strings.Join(placeholders, ",")), args...) //nolint:gosec // G201: dbName is validated by caller
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var survivors []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, survivors, err
+		}
+		survivors = append(survivors, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, survivors, err
+	}
+	return wispsWithoutIDs(wispaudit.WispsFromIDs(ids), survivors), survivors, nil
 }
 
 // AutoClose closes issues that have been open with no updates past staleAge.
@@ -942,7 +1243,7 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, *sql.DB, []string) error) (int, error) {
+func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, sqlReadWriter, []string) error) (int, error) {
 	totalDeleted := 0
 	for {
 		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)

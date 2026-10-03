@@ -3486,8 +3486,16 @@ func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) 
 		return true
 	}
 
-	// Check 2: active_mr on agent bead (set by gt done when MR is created)
-	activeMR, sourceHint := getAgentMRContext(bd, workDir, agentBeadID)
+	// Check 2: active_mr on agent bead (set by gt done when MR is created).
+	// An unreadable agent bead is not the same as a bead that legitimately has
+	// no active_mr, and conflating the two fails open on a nuke safety check
+	// (gt-12f round 2): getAgentMRContext used to return ("", "") for both, and
+	// an empty ActiveMR makes AssessActiveMR report Pending=false — "safe to
+	// nuke" — exactly when the truth is "could not check".
+	activeMR, sourceHint, ok := getAgentMRContext(bd, workDir, agentBeadID)
+	if !ok {
+		return true
+	}
 	assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: activeMRGitSafe(workDir, rigName, polecatName)})
 	return assessment.Pending
 }
@@ -3711,14 +3719,21 @@ func terminalSafeDoneSnapshot(bd *BdCli, workDir, rigName, polecatName string, s
 	return beads.IssueStatus(issue.Status).IsTerminal()
 }
 
-// getAgentMRContext retrieves active_mr and durable source context from an agent bead.
-func getAgentMRContext(bd *BdCli, workDir, agentBeadID string) (string, string) {
+// getAgentMRContext retrieves active_mr and durable source context from an
+// agent bead. ok=false means the bead could not be read or parsed at all —
+// callers must treat that as "unknown", never as "no active MR" (gt-12f round
+// 2 hardening): an unreadable agent bead and a bead that legitimately has no
+// active_mr used to return the identical ("", "") pair, and the caller
+// (hasPendingMR) read an empty ActiveMR as proof there was nothing pending,
+// failing open on exactly the case — Dolt hiccup, bad JSON, a hung bd — where
+// the honest answer is "could not check".
+func getAgentMRContext(bd *BdCli, workDir, agentBeadID string) (activeMR, sourceHint string, ok bool) {
 	if bd == nil || bd.Exec == nil {
-		return "", ""
+		return "", "", false
 	}
 	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
 	if err != nil || output == "" {
-		return "", ""
+		return "", "", false
 	}
 	var issues []struct {
 		ActiveMR    string `json:"active_mr"`
@@ -3726,14 +3741,14 @@ func getAgentMRContext(bd *BdCli, workDir, agentBeadID string) (string, string) 
 		Description string `json:"description"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return "", ""
+		return "", "", false
 	}
 	fields := beads.ParseAgentFields(issues[0].Description)
-	activeMR := issues[0].ActiveMR
+	activeMR = issues[0].ActiveMR
 	if activeMR == "" && fields != nil {
 		activeMR = fields.ActiveMR
 	}
-	sourceHint := issues[0].HookBead
+	sourceHint = issues[0].HookBead
 	if fields != nil {
 		sourceHint = fields.LastSourceIssue
 		if sourceHint == "" {
@@ -3743,7 +3758,7 @@ func getAgentMRContext(bd *BdCli, workDir, agentBeadID string) (string, string) 
 			sourceHint = issues[0].HookBead
 		}
 	}
-	return activeMR, sourceHint
+	return activeMR, sourceHint, true
 }
 
 type beadCLIShower struct {

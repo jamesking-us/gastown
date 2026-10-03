@@ -31,6 +31,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -125,6 +126,12 @@ func isEvidenceBearing(w *purgeCandidate) bool {
 	if w.CommentCount > 0 {
 		return true
 	}
+	if wispaudit.HasProtectedLabel(w.Labels) {
+		return true
+	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+		return true
+	}
 	for _, label := range w.Labels {
 		if label == "keep" || label == "gt:keep" {
 			return true
@@ -165,6 +172,14 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 		if w.Status != "closed" {
 			continue
 		}
+		closedAt, ok := wispClosedAt(w)
+		if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+			// A scoped completion purge still has the mandatory seven-day
+			// floor. Its only exception is intentionally absent here: a polecat
+			// may not silently make its just-closed molecule steps disposable.
+			kept++
+			continue
+		}
 		if isEvidenceBearing(w) {
 			kept++
 			continue
@@ -186,7 +201,30 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 	}
 
 	deleted, failures := deleteWisps(bd, doomed)
-	reportWispPurge(actor, wispaudit.PathDonePurge, scope, scopeDB, deleted, failures, extra)
+	reportWispPurge(actor, wispaudit.PathDonePurge, scope, scopeDB, bd, deleted, failures, extra)
+}
+
+// purgeExclusion counts wisps withheld from an unscoped purge, by reason.
+// gt-12f requires these exclusions be visible in the audit record, not just
+// applied silently.
+type purgeExclusion struct {
+	mergeRequest int // excluded via ProtectedLabel (gt:merge-request)
+	compliance   int // excluded via a compliance-seat comment author
+	unreadable   int // comments could not be read — failed closed
+}
+
+// asExtra renders non-zero exclusion counts for the audit record's extra
+// fields. A zero count is omitted rather than printed as noise.
+func (e purgeExclusion) asExtra(extra map[string]interface{}) {
+	if e.mergeRequest > 0 {
+		extra["kept_merge_request"] = e.mergeRequest
+	}
+	if e.compliance > 0 {
+		extra["kept_compliance_commented"] = e.compliance
+	}
+	if e.unreadable > 0 {
+		extra["kept_unreadable"] = e.unreadable
+	}
 }
 
 // purgeClosedEphemeralBeads purges closed ephemeral beads across the database
@@ -197,72 +235,120 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 // resolve each retiring polecat's molecule before the sandbox goes; that is
 // tracked separately rather than bolted on here.
 //
+// gt-12f: this purge is no longer delegated to `bd purge --older-than`, which
+// has no concept of a protected bead and would delete a merge-request bead or
+// a compliance-commented bead exactly as readily as anything else. The
+// candidate set is computed and filtered here instead, and the delete is the
+// same explicit, by-id path planUnscopedPurge's callers (including --dry-run)
+// already see — so a dry-run can never show a different set than the one that
+// actually gets deleted.
+//
 // Best-effort: failures are logged but don't block the caller.
 func purgeClosedEphemeralBeads(bd *beads.Beads, actor, scopeDB string) {
-	// bd purge reports a count, never the ids it removed, so the ids are
-	// enumerated here instead — an approximate list of names beats an exact
-	// number when the question later is "what was in there".
-	predicted := predictUnscopedPurge(bd)
-	if !recordWispPurgePlan(actor, wispaudit.PathPolecatNuke, "database", scopeDB, predicted, map[string]interface{}{
-		"older_than": unscopedPurgeMinAge,
-		"predicted":  true,
-	}) {
+	doomed, excluded, err := planUnscopedPurge(bd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't list wisps for purge: %v\n", err)
+		return
+	}
+	if len(doomed) == 0 {
 		return
 	}
 
-	out, err := bd.Run("purge", "--force", "--quiet", "--older-than", unscopedPurgeMinAge)
-	if err != nil {
-		// Non-fatal: purge failure shouldn't block session completion
-		fmt.Fprintf(os.Stderr, "Warning: wisp purge failed: %v\n", err)
+	extra := map[string]interface{}{"older_than": unscopedPurgeMinAge}
+	excluded.asExtra(extra)
+
+	if !recordWispPurgePlan(actor, wispaudit.PathPolecatNuke, "database", scopeDB, doomed, extra) {
 		return
 	}
-	// bd purge --force --quiet outputs the count of purged beads
-	outStr := strings.TrimSpace(string(out))
-	if outStr == "" || outStr == "0" {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads older than %s: %s\n", unscopedPurgeMinAge, outStr)
-	reportWispPurge(actor, wispaudit.PathPolecatNuke, "database", scopeDB, predicted, nil, map[string]interface{}{
-		"older_than":     unscopedPurgeMinAge,
-		"predicted":      true,
-		"reported_count": outStr,
-	})
+
+	deleted, failures := deleteWisps(bd, doomed)
+	reportWispPurge(actor, wispaudit.PathPolecatNuke, "database", scopeDB, bd, deleted, failures, extra)
 }
 
-// predictUnscopedPurge names the wisps `bd purge --older-than` is expected to
-// remove from this database. It is a prediction, not a result — bd applies its
-// own definition of "closed ephemeral" and protects pinned rows — so callers
-// record it as such. An error here is not fatal: an approximate receipt is
-// still better than no receipt, and a purge with an empty prediction still
-// runs under its age floor.
-func predictUnscopedPurge(bd *beads.Beads) []wispaudit.Wisp {
+// planUnscopedPurge returns the exact wisps the database-wide purge would
+// delete — closed, older than unscopedPurgeMinAge, and not protected — plus a
+// count of what was excluded and why.
+//
+// This is the single source of truth for both the real purge and --dry-run:
+// gt-12f's bug report named "the purge is not discoverable before the act" as
+// part of the defect, and a dry-run that calls a different function than the
+// real delete can drift from it silently. Both call this one.
+//
+// Fails closed per cl-kf00: a wisp labelled gt:merge-request, or carrying a
+// comment from a compliance seat, is excluded on that structured signal alone
+// — never on a marker string in title or description text, which a rephrase
+// can miss. A wisp whose comments cannot be read is excluded too; an unknown
+// protection state is not evidence of safety to delete.
+func planUnscopedPurge(bd *beads.Beads) ([]wispaudit.Wisp, purgeExclusion, error) {
 	all, err := listAllWisps(bd)
 	if err != nil {
-		return nil
+		return nil, purgeExclusion{}, err
 	}
+
 	cutoff := time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)
-	var predicted []wispaudit.Wisp
+	var doomed []wispaudit.Wisp
+	var excluded purgeExclusion
 	for _, w := range all {
 		if w.Status != "closed" {
 			continue
 		}
-		if closedAt, ok := wispClosedAt(w); ok && closedAt.After(cutoff) {
+		closedAt, ok := wispClosedAt(w)
+		if !ok {
+			// An absent or malformed closure time is not evidence that this row
+			// cleared the mandatory seven-day floor. Keep it rather than silently
+			// turning an unparseable value into "old".
+			excluded.unreadable++
 			continue
 		}
-		predicted = append(predicted, wispaudit.Wisp{ID: w.ID, Title: w.Title})
+		if closedAt.After(cutoff) {
+			continue
+		}
+		if wispaudit.HasProtectedLabel(w.Labels) {
+			excluded.mergeRequest++
+			continue
+		}
+		if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+			excluded.compliance++
+			continue
+		}
+		if w.CommentCount > 0 {
+			protected, readable := commentsAreProtected(bd, w.ID, w.CommentCount)
+			if !readable {
+				excluded.unreadable++
+				continue
+			}
+			if protected {
+				excluded.compliance++
+				continue
+			}
+		}
+		doomed = append(doomed, wispaudit.Wisp{ID: w.ID, Title: w.Title})
 	}
-	return predicted
+	return doomed, excluded, nil
 }
 
-// wispClosedAt reports when a wisp was closed, falling back to its last update
-// when bd omits closed_at. A wisp whose timestamp will not parse reports false,
-// and the caller then treats it as old enough — matching bd, which is the thing
-// actually deciding.
+// commentsAreProtected reports whether id carries a comment from a compliance
+// seat, and whether its comments could be read at all. Callers must treat
+// readable=false as "do not purge" (fail closed), not as "not protected".
+func commentsAreProtected(bd *beads.Beads, id string, expectedCount int) (protected, readable bool) {
+	comments, err := bd.Comments(id)
+	if err != nil {
+		return false, false
+	}
+	if len(comments) != expectedCount {
+		return false, false
+	}
+	authors := make([]string, 0, len(comments))
+	for _, c := range comments {
+		authors = append(authors, c.Author)
+	}
+	return wispaudit.AnyComplianceSeatAuthor(authors), true
+}
+
+// wispClosedAt reports when a wisp was closed. Missing or malformed closed_at
+// is unknown, never an excuse to substitute updated_at and delete it.
 func wispClosedAt(w *purgeCandidate) (time.Time, bool) {
 	ts := w.ClosedAt
-	if ts == "" {
-		ts = w.UpdatedAt
-	}
 	if ts == "" {
 		return time.Time{}, false
 	}
@@ -295,30 +381,99 @@ func recordWispPurgePlan(actor, path, scope, scopeDB string, wisps []wispaudit.W
 // reportWispPurge writes the post-deletion record. Unlike the plan record this
 // one is advisory: the deletion already happened, and the plan record already
 // names the ids.
-func reportWispPurge(actor, path, scope, scopeDB string, deleted []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
-	if err := wispaudit.Completed(actor, path, scope, scopeDB, deleted, failures, extra); err != nil {
+func reportWispPurge(actor, path, scope, scopeDB string, bd *beads.Beads, deleted []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
+	verified, survivors, verifyErr := confirmWispsGone(bd, deleted)
+	if verifyErr != nil {
+		extra["verify_error"] = verifyErr.Error()
+		failures = append(failures, "post-delete verification: "+verifyErr.Error())
+	} else if len(survivors) > 0 {
+		extra["survived_purge"] = survivors
+		for _, id := range survivors {
+			failures = append(failures, id+": still present after purge")
+		}
+	}
+
+	var err error
+	if len(failures) > 0 || verifyErr != nil {
+		err = wispaudit.Partial(actor, path, scope, scopeDB, verified, failures, extra)
+	} else {
+		err = wispaudit.Completed(actor, path, scope, scopeDB, verified, nil, extra)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't record wisp purge completion: %v\n", err)
 	}
+}
+
+// confirmWispsGone reads the just-deleted IDs back from bd. A successful
+// delete command is not evidence that every row disappeared: only IDs absent
+// from this post-delete query may be named in a completed audit receipt.
+func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispaudit.Wisp, survivors []string, err error) {
+	if len(wisps) == 0 {
+		return nil, nil, nil
+	}
+	args := append([]string{"show", "--json"}, wispaudit.IDs(wisps)...)
+	out, err := bd.Run(args...)
+	if err != nil {
+		// Real bd returns exit 1, {"error":"no issues found..."} on
+		// stdout, and "no issue found" on stderr when every requested id is
+		// gone. Beads normalizes that exact stderr shape to ErrNotFound;
+		// partial results instead exit zero with a JSON array, so they remain
+		// survivors below.
+		if errors.Is(err, beads.ErrNotFound) {
+			return wisps, nil, nil
+		}
+		return nil, nil, fmt.Errorf("reading deleted wisps: %w", err)
+	}
+	out = extractJSONArray(out)
+	if len(out) == 0 || out[0] != '[' {
+		if strings.Contains(strings.ToLower(string(out)), "no issues found") {
+			return wisps, nil, nil
+		}
+		return nil, nil, fmt.Errorf("reading deleted wisps: expected JSON array")
+	}
+	var found []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &found); err != nil {
+		return nil, nil, fmt.Errorf("parsing deleted wisp check: %w", err)
+	}
+	foundIDs := make(map[string]struct{}, len(found))
+	for _, w := range found {
+		foundIDs[w.ID] = struct{}{}
+	}
+	for _, w := range wisps {
+		if _, found := foundIDs[w.ID]; found {
+			survivors = append(survivors, w.ID)
+			continue
+		}
+		verified = append(verified, w)
+	}
+	return verified, survivors, nil
 }
 
 // deleteWisps deletes wisps in batches, returning what went and what didn't.
 // A failed batch is reported rather than retried one id at a time: the plan
 // record already names every id, so a partial purge is auditable as it stands.
 func deleteWisps(bd *beads.Beads, wisps []wispaudit.Wisp) (deleted []wispaudit.Wisp, failures []string) {
-	for start := 0; start < len(wisps); start += maxWispDeleteBatch {
-		end := start + maxWispDeleteBatch
-		if end > len(wisps) {
-			end = len(wisps)
-		}
-		batch := wisps[start:end]
-		ids := wispaudit.IDs(batch)
-		args := append([]string{"delete"}, ids...)
-		args = append(args, "--force")
-		if _, err := bd.Run(args...); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", strings.Join(ids, ","), err))
+	for _, wisp := range wisps {
+		// The plan is only a snapshot. Re-read this exact id immediately
+		// before the destructive call so a reopen, fresh close, or newly-added
+		// compliance verdict cannot be erased between planning and deletion.
+		eligible, err := wispStillDeleteEligible(bd, wisp.ID)
+		if err != nil {
+			failures = append(failures, wisp.ID+": re-check before delete: "+err.Error())
 			continue
 		}
-		deleted = append(deleted, batch...)
+		if !eligible {
+			failures = append(failures, wisp.ID+": changed after purge plan; kept")
+			continue
+		}
+		args := []string{"delete", wisp.ID, "--force"}
+		if _, err := bd.Run(args...); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", wisp.ID, err))
+			continue
+		}
+		deleted = append(deleted, wisp)
 	}
 	if len(deleted) > 0 {
 		fmt.Fprintf(os.Stderr, "Purged %d closed wisp(s) from this session's molecule\n", len(deleted))
@@ -327,4 +482,39 @@ func deleteWisps(bd *beads.Beads, wisps []wispaudit.Wisp) (deleted []wispaudit.W
 		fmt.Fprintf(os.Stderr, "Warning: wisp delete failed: %s\n", f)
 	}
 	return deleted, failures
+}
+
+// wispStillDeleteEligible is the last safety boundary before an explicit bd
+// delete. It deliberately repeats the full status, closed_at, label, and
+// comment-author checks rather than trusting an earlier plan.
+func wispStillDeleteEligible(bd *beads.Beads, id string) (bool, error) {
+	all, err := listAllWisps(bd)
+	if err != nil {
+		return false, err
+	}
+	var w *purgeCandidate
+	for _, candidate := range all {
+		if candidate.ID == id {
+			w = candidate
+			break
+		}
+	}
+	if w == nil || w.Status != "closed" {
+		return false, nil
+	}
+	closedAt, ok := wispClosedAt(w)
+	if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+		return false, nil
+	}
+	if wispaudit.HasProtectedLabel(w.Labels) {
+		return false, nil
+	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+		return false, nil
+	}
+	if w.CommentCount == 0 {
+		return true, nil
+	}
+	protected, readable := commentsAreProtected(bd, w.ID, w.CommentCount)
+	return readable && !protected, nil
 }

@@ -278,7 +278,10 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 				promoteWisp(bd, w, "proven value", result, opts)
 			} else if age > ttl {
 				if isMoleculeStep {
-					deleteWisp(bd, w, "molecule step past TTL", result, audit, opts)
+					// An open molecule step is live workflow state, even when its
+					// TTL is stale. Only a later closed, seven-day-old step can
+					// enter a delete path.
+					result.Skipped++
 				} else {
 					reason := "open past TTL"
 					if w.Status == "in_progress" {
@@ -298,7 +301,16 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 			if shouldPromote && !isMoleculeStep {
 				promoteWisp(bd, w, "proven value", result, opts)
 			} else if age > ttl {
-				deleteWisp(bd, w, "TTL expired", result, audit, opts)
+				// Re-read at the destructive boundary; the earlier scan is only
+				// a plan and a candidate may have reopened or gained protection.
+				current, recheckErr := compactDeleteCandidateNow(bd, w.ID)
+				if recheckErr != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("delete %s: re-check before delete: %v", w.ID, recheckErr))
+				} else if current == nil {
+					result.Skipped++
+				} else {
+					deleteWisp(bd, current, "TTL expired", result, audit, opts)
+				}
 			} else {
 				result.Skipped++
 				if opts.Verbose && !opts.Quiet {
@@ -318,6 +330,19 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 	}
 
 	return result, nil
+}
+
+func compactDeleteCandidateNow(bd *beads.Beads, id string) (*compactIssue, error) {
+	all, err := listWisps(bd)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range all {
+		if w.ID == id {
+			return w, nil
+		}
+	}
+	return nil, nil
 }
 
 // cleanOrphanedWispDeps removes wisp_dependencies rows where either side no
@@ -443,6 +468,33 @@ type compactAudit struct {
 // is a batch record that can be minutes stale by the time the delete it
 // describes actually happens.
 func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult, audit compactAudit, opts compactOptions) {
+	if w.Status != "closed" {
+		result.Skipped++
+		return
+	}
+	closedAt, ok := compactClosedAt(w)
+	if !ok || closedAt.After(time.Now().UTC().Add(-unscopedPurgeMinAgeDuration)) {
+		// Compaction's per-type TTL may be shorter than the deletion floor;
+		// it may promote stale open work, but it never deletes a closed wisp
+		// without a parseable closed_at at least seven days old.
+		result.Skipped++
+		return
+	}
+	// gt-12f/cl-kf00: a molecule step with a Parent is never promoted (see the
+	// caller), so a closed, past-TTL molecule step carrying a compliance
+	// comment used to reach this function and be deleted anyway — the comment
+	// protection only ran as part of the promotion decision. Check it here
+	// instead, where every delete actually goes through, regardless of why the
+	// caller decided to delete rather than promote.
+	if protected, why := protectedFromDeletion(bd, w); protected {
+		result.Skipped++
+		if opts.Verbose && !opts.Quiet {
+			fmt.Printf("  %s skip  %s %s (%s)\n",
+				style.Dim.Render("protected"), w.ID, compactTruncate(w.Title, 40), why)
+		}
+		return
+	}
+
 	action := compactAction{ID: w.ID, Title: w.Title, Reason: reason, WispType: w.WispType}
 
 	if opts.DryRun {
@@ -471,13 +523,41 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
+	verified, survivors, verifyErr := confirmWispsGone(bd, doomed)
+	if verifyErr != nil {
+		extra["verify_error"] = verifyErr.Error()
+		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: could not verify deletion: %v", w.ID, verifyErr))
+		_ = wispaudit.Partial(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, nil,
+			[]string{"post-delete verification: " + verifyErr.Error()}, extra)
+		return
+	}
+	if len(survivors) > 0 {
+		extra["survived_purge"] = survivors
+		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: still present after delete", w.ID))
+		_ = wispaudit.Partial(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, verified,
+			[]string{w.ID + ": still present after delete"}, extra)
+		return
+	}
+
 	result.Deleted = append(result.Deleted, action)
-	_ = wispaudit.Completed(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, doomed, nil, extra)
+	_ = wispaudit.Completed(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, verified, nil, extra)
 
 	if opts.Verbose && !opts.Quiet {
 		fmt.Printf("  %s %s %s (%s)\n",
 			style.Warning.Render("delete "), w.ID, compactTruncate(w.Title, 40), reason)
 	}
+}
+
+func compactClosedAt(w *compactIssue) (time.Time, bool) {
+	if w.ClosedAt == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z"} {
+		if t, err := time.Parse(layout, w.ClosedAt); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func printCompactSummary(result *compactResult, opts compactOptions) {
@@ -526,6 +606,35 @@ func compactTruncate(s string, maxLen int) string {
 		return string([]rune(s)[:maxLen])
 	}
 	return string([]rune(s)[:maxLen-3]) + "..."
+}
+
+// protectedFromDeletion reports whether w must never be deleted by
+// compaction, independent of the TTL/promotion decision that routed it here:
+// a merge-request bead, or one carrying a compliance-seat comment (gt-12f/
+// cl-kf00). Fails closed — a candidate whose comments cannot be read is kept,
+// never deleted on an unknown protection state.
+func protectedFromDeletion(bd *beads.Beads, w *compactIssue) (protected bool, reason string) {
+	if wispaudit.HasProtectedLabel(w.Labels) {
+		return true, "merge-request label"
+	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+		return true, "compliance mail author"
+	}
+	if w.CommentCount == 0 {
+		return false, ""
+	}
+	out, err := bd.Run("comments", w.ID, "--json")
+	if err != nil {
+		return true, "comments unreadable"
+	}
+	isProtected, readable, count := wispaudit.CommentsProtectedCount(out)
+	if !readable || count != w.CommentCount {
+		return true, "comments unreadable"
+	}
+	if isProtected {
+		return true, "compliance-seat comment"
+	}
+	return false, ""
 }
 
 // hasComments checks the comment_count on the compactIssue.

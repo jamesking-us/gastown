@@ -377,6 +377,16 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 				}
 				fmt.Printf("%s: %spurged %d wisps, %d mail\n",
 					r.Database, prefix, r.WispsPurged, r.MailPurged)
+				// gt-12f: a dry run must show the exact candidate list, not
+				// just a count, so it is discoverable before the real run acts.
+				if r.DryRun {
+					for _, id := range r.WispsPurgedIDs {
+						fmt.Printf("    wisp  %s\n", id)
+					}
+					for _, id := range r.MailPurgedIDs {
+						fmt.Printf("    mail  %s\n", id)
+					}
+				}
 				for _, a := range r.Anomalies {
 					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
 				}
