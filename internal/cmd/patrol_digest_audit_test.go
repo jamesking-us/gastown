@@ -28,6 +28,7 @@ func listingBD(t *testing.T, listJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *list*) cat %q ;;
+	*show*) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath)

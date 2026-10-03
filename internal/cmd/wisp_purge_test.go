@@ -112,6 +112,7 @@ func recordingBD(t *testing.T, queryJSON string) func() []string {
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *query*) cat %q ;;
+	*show*) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath)

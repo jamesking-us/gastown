@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wispaudit"
 )
@@ -438,7 +439,34 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 		return 0, fmt.Errorf("deleting patrol digests: %w", err)
 	}
 
-	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil, extra)
+	workDir, err := os.Getwd()
+	if err != nil {
+		return 0, fmt.Errorf("getting patrol digest workdir for verification: %w", err)
+	}
+	verified, survivors, verifyErr := confirmWispsGone(beads.New(workDir), doomed)
+	if verifyErr != nil {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["verify_error"] = verifyErr.Error()
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, nil,
+			[]string{"post-delete verification: " + verifyErr.Error()}, extra)
+		return 0, fmt.Errorf("verifying patrol digest deletion: %w", verifyErr)
+	}
+	if len(survivors) > 0 {
+		if extra == nil {
+			extra = make(map[string]interface{})
+		}
+		extra["survived_purge"] = survivors
+		failures := make([]string, 0, len(survivors))
+		for _, id := range survivors {
+			failures = append(failures, id+": still present after delete")
+		}
+		_ = wispaudit.Partial(actor, wispaudit.PathPatrolDigest, scope, db, verified, failures, extra)
+		return len(verified), fmt.Errorf("%d patrol digest(s) survived deletion", len(survivors))
+	}
 
-	return len(idsToDelete), nil
+	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, verified, nil, extra)
+
+	return len(verified), nil
 }

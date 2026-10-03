@@ -189,7 +189,7 @@ func purgeOwnClosedWisps(bd *beads.Beads, actor, scopeDB, moleculeID string) {
 	}
 
 	deleted, failures := deleteWisps(bd, doomed)
-	reportWispPurge(actor, wispaudit.PathDonePurge, scope, scopeDB, deleted, failures, extra)
+	reportWispPurge(actor, wispaudit.PathDonePurge, scope, scopeDB, bd, deleted, failures, extra)
 }
 
 // purgeExclusion counts wisps withheld from an unscoped purge, by reason.
@@ -250,7 +250,7 @@ func purgeClosedEphemeralBeads(bd *beads.Beads, actor, scopeDB string) {
 	}
 
 	deleted, failures := deleteWisps(bd, doomed)
-	reportWispPurge(actor, wispaudit.PathPolecatNuke, "database", scopeDB, deleted, failures, extra)
+	reportWispPurge(actor, wispaudit.PathPolecatNuke, "database", scopeDB, bd, deleted, failures, extra)
 }
 
 // planUnscopedPurge returns the exact wisps the database-wide purge would
@@ -369,10 +369,63 @@ func recordWispPurgePlan(actor, path, scope, scopeDB string, wisps []wispaudit.W
 // reportWispPurge writes the post-deletion record. Unlike the plan record this
 // one is advisory: the deletion already happened, and the plan record already
 // names the ids.
-func reportWispPurge(actor, path, scope, scopeDB string, deleted []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
-	if err := wispaudit.Completed(actor, path, scope, scopeDB, deleted, failures, extra); err != nil {
+func reportWispPurge(actor, path, scope, scopeDB string, bd *beads.Beads, deleted []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
+	verified, survivors, verifyErr := confirmWispsGone(bd, deleted)
+	if verifyErr != nil {
+		extra["verify_error"] = verifyErr.Error()
+		failures = append(failures, "post-delete verification: "+verifyErr.Error())
+	} else if len(survivors) > 0 {
+		extra["survived_purge"] = survivors
+		for _, id := range survivors {
+			failures = append(failures, id+": still present after purge")
+		}
+	}
+
+	var err error
+	if len(failures) > 0 || verifyErr != nil {
+		err = wispaudit.Partial(actor, path, scope, scopeDB, verified, failures, extra)
+	} else {
+		err = wispaudit.Completed(actor, path, scope, scopeDB, verified, nil, extra)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't record wisp purge completion: %v\n", err)
 	}
+}
+
+// confirmWispsGone reads the just-deleted IDs back from bd. A successful
+// delete command is not evidence that every row disappeared: only IDs absent
+// from this post-delete query may be named in a completed audit receipt.
+func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispaudit.Wisp, survivors []string, err error) {
+	if len(wisps) == 0 {
+		return nil, nil, nil
+	}
+	args := append([]string{"show", "--json"}, wispaudit.IDs(wisps)...)
+	out, err := bd.Run(args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading deleted wisps: %w", err)
+	}
+	out = extractJSONArray(out)
+	if len(out) == 0 || out[0] != '[' {
+		return nil, nil, fmt.Errorf("reading deleted wisps: expected JSON array")
+	}
+	var found []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &found); err != nil {
+		return nil, nil, fmt.Errorf("parsing deleted wisp check: %w", err)
+	}
+	foundIDs := make(map[string]struct{}, len(found))
+	for _, w := range found {
+		foundIDs[w.ID] = struct{}{}
+	}
+	for _, w := range wisps {
+		if _, found := foundIDs[w.ID]; found {
+			survivors = append(survivors, w.ID)
+			continue
+		}
+		verified = append(verified, w)
+	}
+	return verified, survivors, nil
 }
 
 // deleteWisps deletes wisps in batches, returning what went and what didn't.

@@ -486,8 +486,24 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
+	verified, survivors, verifyErr := confirmWispsGone(bd, doomed)
+	if verifyErr != nil {
+		extra["verify_error"] = verifyErr.Error()
+		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: could not verify deletion: %v", w.ID, verifyErr))
+		_ = wispaudit.Partial(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, nil,
+			[]string{"post-delete verification: " + verifyErr.Error()}, extra)
+		return
+	}
+	if len(survivors) > 0 {
+		extra["survived_purge"] = survivors
+		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: still present after delete", w.ID))
+		_ = wispaudit.Partial(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, verified,
+			[]string{w.ID + ": still present after delete"}, extra)
+		return
+	}
+
 	result.Deleted = append(result.Deleted, action)
-	_ = wispaudit.Completed(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, doomed, nil, extra)
+	_ = wispaudit.Completed(audit.actor, wispaudit.PathCompaction, "ttl:"+reason, audit.db, verified, nil, extra)
 
 	if opts.Verbose && !opts.Quiet {
 		fmt.Printf("  %s %s %s (%s)\n",

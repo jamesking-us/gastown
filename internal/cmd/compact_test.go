@@ -528,6 +528,7 @@ func TestDeleteWispDeletesUnprotectedWisp(t *testing.T) {
 case "$1" in
   comments) echo '[{"author":"gastown/polecats/toast"}]' ;;
   delete) exit 0 ;;
+	show) echo '[]' ;;
   *) echo "unexpected bd invocation: $*" >&2; exit 1 ;;
 esac
 `
