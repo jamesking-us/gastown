@@ -406,6 +406,9 @@ func confirmWispsGone(bd *beads.Beads, wisps []wispaudit.Wisp) (verified []wispa
 	}
 	out = extractJSONArray(out)
 	if len(out) == 0 || out[0] != '[' {
+		if strings.Contains(strings.ToLower(string(out)), "no issues found") {
+			return wisps, nil, nil
+		}
 		return nil, nil, fmt.Errorf("reading deleted wisps: expected JSON array")
 	}
 	var found []struct {
