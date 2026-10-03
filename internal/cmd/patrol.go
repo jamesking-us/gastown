@@ -159,6 +159,13 @@ func runPatrolDigest(cmd *cobra.Command, args []string) error {
 		for _, role := range roles {
 			fmt.Printf("    %s: %d cycles\n", role, digest.ByRole[role])
 		}
+		// The digest cleanup is destructive outside dry-run. Name the exact
+		// source wisps here so the preview is an auditable prediction rather
+		// than a count that can conceal a different delete set.
+		fmt.Printf("  Source wisps to delete:\n")
+		for _, cycle := range cycles {
+			fmt.Printf("    %s  %s\n", cycle.ID, cycle.Title)
+		}
 		return nil
 	}
 
