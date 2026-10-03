@@ -646,6 +646,7 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 	// is. Survivors are named so a later investigation does not have to
 	// rediscover that the purge silently failed for part of its set.
 	var failures []string
+	verifiedGone := []wispaudit.Wisp(nil)
 	if survivors, verifyErr := verifyPurgeSurvivors(env, workDir, doomed); verifyErr != nil {
 		extra["verify_error"] = verifyErr.Error()
 	} else if len(survivors) > 0 {
@@ -653,17 +654,41 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 		for _, id := range survivors {
 			failures = append(failures, id+": still present after purge")
 		}
+		verifiedGone = wispsWithoutIDs(doomed, survivors)
+	} else {
+		verifiedGone = doomed
 	}
 	// Completed names only rows that the post-delete read proved absent. A
 	// verification error or survivor is a partial outcome, never a completed
 	// purge record for work that may still be present.
 	if len(failures) > 0 || extra["verify_error"] != nil {
-		_ = wispaudit.Partial(wispaudit.Actor("gt"), path, "database", dbName, doomed, failures, extra)
+		_ = wispaudit.Partial(wispaudit.Actor("gt"), path, "database", dbName, verifiedGone, failures, extra)
 	} else {
-		_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, nil, extra)
+		_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, verifiedGone, nil, extra)
 	}
 
 	return purgedCount, nil
+}
+
+// wispsWithoutIDs returns only the candidates whose IDs are not in excluded.
+// It is used for post-delete receipts: an attempted deletion is not evidence
+// that a row is gone, while a row observed after the deletion must never be
+// named as removed.
+func wispsWithoutIDs(wisps []wispaudit.Wisp, excluded []string) []wispaudit.Wisp {
+	if len(wisps) == 0 {
+		return nil
+	}
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, id := range excluded {
+		excludedSet[id] = struct{}{}
+	}
+	kept := make([]wispaudit.Wisp, 0, len(wisps))
+	for _, w := range wisps {
+		if _, found := excludedSet[w.ID]; !found {
+			kept = append(kept, w)
+		}
+	}
+	return kept
 }
 
 // deleteWispsByID deletes exactly the re-checked wisps by id, in batches. A

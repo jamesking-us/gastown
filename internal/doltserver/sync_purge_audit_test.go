@@ -302,6 +302,13 @@ func TestPurgeClosedEphemeralsFlagsASurvivor(t *testing.T) {
 	if !strings.Contains(failed, "cl-wisp-aaa") {
 		t.Errorf("completed record failed = %v, want cl-wisp-aaa named as a failure", completed["failed"])
 	}
+	removed := fmt.Sprint(completed["wisps"])
+	if strings.Contains(removed, "cl-wisp-aaa") {
+		t.Errorf("partial record wisps = %v names a survivor as deleted", completed["wisps"])
+	}
+	if !strings.Contains(removed, "cl-wisp-bbb") {
+		t.Errorf("partial record wisps = %v, want the independently verified deletion named", completed["wisps"])
+	}
 }
 
 // failingBD installs a `bd` that answers the wisp query but fails the purge.
