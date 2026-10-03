@@ -593,37 +593,13 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 // record is written first, and a database whose record will not write is not
 // purged — the caller sees an error and continues with the rest of the sync.
 func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, error) {
-	// Resolve the beads directory for this rig (read-only — never create dirs during purge)
-	beadsDir := FindRigBeadsDir(townRoot, dbName)
-
-	// Check that the beads directory actually exists on disk.
-	// FindRigBeadsDir returns a path even for non-existent directories,
-	// so we must verify existence explicitly.
-	if _, err := os.Stat(beadsDir); err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil // no beads dir — nothing to purge
-		}
-		return 0, fmt.Errorf("checking beads dir for %s: %w", dbName, err)
+	env, workDir, ok, err := resolvePurgeWorkdir(townRoot, dbName)
+	if err != nil {
+		return 0, err
 	}
-
-	// Skip databases with uninitialized beads dirs (no metadata.json).
-	// An empty .beads/ directory causes bd to attempt a fresh bootstrap,
-	// which hangs waiting on dolt init or lock acquisition.
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if info, err := os.Stat(metadataPath); err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil // not initialized — nothing to purge
-		}
-		return 0, fmt.Errorf("checking metadata for %s: %w", dbName, err)
-	} else if info.IsDir() {
-		return 0, fmt.Errorf("metadata.json for %s is a directory", dbName)
+	if !ok {
+		return 0, nil // no beads dir, or not initialized — nothing to purge
 	}
-
-	// Build bd command env with safety-net timeout.
-	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
-	// generous timeout as a circuit breaker against future regressions.
-	env := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
-	workDir := filepath.Dir(beadsDir) // run from parent of .beads
 
 	// bd purge reports a count and never the ids it removed, so the set is
 	// enumerated here instead and recorded before the purge runs. It is also
@@ -631,7 +607,16 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 	// concept of a protected bead (it only protects pinned rows), so a
 	// merge-request bead or a compliance-commented bead must be identified and
 	// withheld here, before bd ever runs.
-	doomed, excluded := planClosedEphemeralPurge(env, workDir)
+	//
+	// A listing failure must abort the purge rather than fall through to bd's
+	// own blanket definition (gt-12f round 2): an empty exclusion set because
+	// the list could not be read is indistinguishable, at the isZero() check
+	// below, from an empty exclusion set because nothing protected exists — and
+	// only the second one is safe to hand to bd's unconditional purge.
+	doomed, excluded, err := planClosedEphemeralPurge(env, workDir)
+	if err != nil {
+		return 0, fmt.Errorf("skipping purge for %s: could not list closed ephemerals first: %w", dbName, err)
+	}
 
 	if dryRun {
 		return len(doomed), nil
@@ -644,7 +629,6 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 	}
 
 	var purgedCount int
-	var err error
 	if excluded.isZero() {
 		// Fast path: nothing protected is sitting in this database right now,
 		// so bd's own blanket purge is exactly as safe as the explicit delete
@@ -666,7 +650,23 @@ func PurgeClosedEphemerals(townRoot, dbName, path string, dryRun bool) (int, err
 	// database — a false record is worse than a missing one. The planned record
 	// already stands in every case, which is the point of writing it first.
 	extra["reported_count"] = purgedCount
-	_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, nil, extra)
+
+	// Post-delete verification (gt-12f round 2): the cl-wisp-0u30 shape was a
+	// wisp named in 202 "completed" purge events that was never actually gone.
+	// A reported count or a predicted id list is not evidence a row is gone;
+	// re-querying the predicted set and recording only what is confirmed absent
+	// is. Survivors are named so a later investigation does not have to
+	// rediscover that the purge silently failed for part of its set.
+	var failures []string
+	if survivors, verifyErr := verifyPurgeSurvivors(env, workDir, doomed); verifyErr != nil {
+		extra["verify_error"] = verifyErr.Error()
+	} else if len(survivors) > 0 {
+		extra["survived_purge"] = survivors
+		for _, id := range survivors {
+			failures = append(failures, id+": still present after purge")
+		}
+	}
+	_ = wispaudit.Completed(wispaudit.Actor("gt"), path, "database", dbName, doomed, failures, extra)
 
 	return purgedCount, nil
 }
@@ -764,6 +764,126 @@ func deleteWispsByID(env []string, workDir, dbName string, wisps []wispaudit.Wis
 	return deleted, nil
 }
 
+// verifyPurgeSurvivors re-queries ids after a purge and reports which of them
+// are still present. `bd show --json <ids...>` returns a JSON array
+// containing only the ids it could find — the same tolerant-of-missing-ids
+// behavior ShowMultiple relies on elsewhere in this tree — so anything that
+// comes back is evidence the delete did not actually take for that id (the
+// cl-wisp-0u30 shape: a purge reported success for a row that stayed live).
+//
+// A failure to run the check itself is reported as an error, never silently
+// treated as "everything survived" or "everything is gone" — an unverified
+// batch is an unknown, not a verdict.
+func verifyPurgeSurvivors(env []string, workDir string, wisps []wispaudit.Wisp) ([]string, error) {
+	ids := wispaudit.IDs(wisps)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	const batchSize = 100
+	var survivors []string
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := append([]string{"show", "--json"}, batch...)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, "bd", args...)
+		cmd.Dir = workDir
+		cmd.Env = env
+		setProcessGroup(cmd)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
+		if timedOut {
+			return survivors, fmt.Errorf("verifying purge: bd show timed out after 30s")
+		}
+		if err != nil {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg == "" {
+				errMsg = strings.TrimSpace(stdout.String())
+			}
+			return survivors, fmt.Errorf("verifying purge: bd show: %w (%s)", err, errMsg)
+		}
+
+		out := extractJSONArray(stdout.Bytes())
+		if len(out) == 0 || out[0] != '[' {
+			continue // bd's "nothing found" shape — the whole batch is confirmed gone
+		}
+		var found []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(out, &found); err != nil {
+			return survivors, fmt.Errorf("verifying purge: parsing bd show output: %w", err)
+		}
+		for _, f := range found {
+			survivors = append(survivors, f.ID)
+		}
+	}
+	return survivors, nil
+}
+
+// resolvePurgeWorkdir resolves the bd environment and working directory for a
+// rig's closed-ephemeral purge, shared by PurgeClosedEphemerals (which acts)
+// and PreviewClosedEphemeralsPurge (which only looks). ok=false means there is
+// nothing to purge for this database (no beads dir, or not yet initialized) —
+// not an error.
+func resolvePurgeWorkdir(townRoot, dbName string) (env []string, workDir string, ok bool, err error) {
+	// Resolve the beads directory for this rig (read-only — never create dirs during purge)
+	beadsDir := FindRigBeadsDir(townRoot, dbName)
+
+	// Check that the beads directory actually exists on disk.
+	// FindRigBeadsDir returns a path even for non-existent directories,
+	// so we must verify existence explicitly.
+	if _, statErr := os.Stat(beadsDir); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, fmt.Errorf("checking beads dir for %s: %w", dbName, statErr)
+	}
+
+	// Skip databases with uninitialized beads dirs (no metadata.json).
+	// An empty .beads/ directory causes bd to attempt a fresh bootstrap,
+	// which hangs waiting on dolt init or lock acquisition.
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if info, statErr := os.Stat(metadataPath); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, fmt.Errorf("checking metadata for %s: %w", dbName, statErr)
+	} else if info.IsDir() {
+		return nil, "", false, fmt.Errorf("metadata.json for %s is a directory", dbName)
+	}
+
+	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
+	// generous timeout as a circuit breaker against future regressions.
+	env = beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	workDir = filepath.Dir(beadsDir) // run from parent of .beads
+	return env, workDir, true, nil
+}
+
+// PreviewClosedEphemeralsPurge returns the exact candidate wisps — and what
+// gt-12f's exclusions withheld — that PurgeClosedEphemerals would remove for
+// dbName, without deleting or recording anything. It is the same
+// planClosedEphemeralPurge call the real purge makes, so a dry-run caller
+// cannot show a different set than the one that would actually be deleted
+// (gt-12f: "--dry-run must show the purge" means the id list, not a count).
+func PreviewClosedEphemeralsPurge(townRoot, dbName string) ([]wispaudit.Wisp, purgeExclusion, error) {
+	env, workDir, ok, err := resolvePurgeWorkdir(townRoot, dbName)
+	if err != nil {
+		return nil, purgeExclusion{}, err
+	}
+	if !ok {
+		return nil, purgeExclusion{}, nil
+	}
+	return planClosedEphemeralPurge(env, workDir)
+}
+
 // closedEphemeralCandidate is one closed ephemeral bead considered for the
 // pre-push/maintenance GC purge, carrying what gt-12f's exclusion rules need.
 type closedEphemeralCandidate struct {
@@ -806,11 +926,18 @@ func (e purgeExclusion) asExtra(extra map[string]interface{}) {
 //
 // It goes through `bd query ephemeral=true`, not `bd list`: bd list does not
 // surface wisps (hq-v9t), so it would silently predict an empty set for exactly
-// the rows this is trying to name. An error here is not fatal — a purge with an
-// empty prediction still records that it ran, and a record naming nothing is
-// still better than no record at all.
-func planClosedEphemeralPurge(env []string, workDir string) ([]wispaudit.Wisp, purgeExclusion) {
-	candidates := listClosedEphemerals(env, workDir)
+// the rows this is trying to name.
+//
+// A listing error is returned, not swallowed (gt-12f round 2): the caller uses
+// an empty purgeExclusion to decide whether bd's own blanket purge is safe to
+// run, and a listing failure that produced doomed=nil, excluded={} was
+// indistinguishable from "nothing protected exists" — which sent the blanket
+// purge ahead with no exclusions at all. The caller must abort instead.
+func planClosedEphemeralPurge(env []string, workDir string) ([]wispaudit.Wisp, purgeExclusion, error) {
+	candidates, err := listClosedEphemerals(env, workDir)
+	if err != nil {
+		return nil, purgeExclusion{}, err
+	}
 
 	var doomed []wispaudit.Wisp
 	var excluded purgeExclusion
@@ -835,12 +962,15 @@ func planClosedEphemeralPurge(env []string, workDir string) ([]wispaudit.Wisp, p
 		}
 		doomed = append(doomed, wispaudit.Wisp{ID: w.ID, Title: w.Title})
 	}
-	return doomed, excluded
+	return doomed, excluded, nil
 }
 
 // listClosedEphemerals queries every closed ephemeral bead in the database
-// `bd` is bound to via env/workDir.
-func listClosedEphemerals(env []string, workDir string) []closedEphemeralCandidate {
+// `bd` is bound to via env/workDir. A non-nil error means the listing could
+// not be trusted — a command failure, a timeout, or output that does not
+// parse as the JSON array bd promises with --json — and callers must not
+// treat that the same as a confirmed-empty result (gt-12f round 2).
+func listClosedEphemerals(env []string, workDir string) ([]closedEphemeralCandidate, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -853,23 +983,38 @@ func listClosedEphemerals(env []string, workDir string) []closedEphemeralCandida
 	cmd.Env = env
 	setProcessGroup(cmd)
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return nil
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("bd query for closed ephemerals: timed out after 60s")
+	}
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg == "" {
+			errMsg = strings.TrimSpace(stdout.String())
+		}
+		return nil, fmt.Errorf("bd query for closed ephemerals: %w (%s)", err, errMsg)
 	}
 
-	// bd answers an empty result set with prose ("No issues found."), which
-	// leaves nothing for extractJSONArray to find.
 	out := extractJSONArray(stdout.Bytes())
 	if len(out) == 0 || out[0] != '[' {
-		return nil
+		// bd answers a confirmed-empty result set with prose ("No issues
+		// found."), which leaves nothing for extractJSONArray to find. That is
+		// the one non-array shape treated as success; anything else unparsed
+		// is an unknown state, not evidence the database holds nothing.
+		trimmed := strings.ToLower(strings.TrimSpace(stdout.String()))
+		if trimmed == "" || strings.Contains(trimmed, "no issues found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("bd query for closed ephemerals: unexpected output format: %s", strings.TrimSpace(stdout.String()))
 	}
 	var wisps []closedEphemeralCandidate
 	if err := json.Unmarshal(out, &wisps); err != nil {
-		return nil
+		return nil, fmt.Errorf("bd query for closed ephemerals: parsing output: %w", err)
 	}
-	return wisps
+	return wisps, nil
 }
 
 // wispCommentsAreProtected reports whether id carries a comment from a
@@ -890,24 +1035,7 @@ func wispCommentsAreProtected(env []string, workDir, id string) (protected, read
 		return false, false
 	}
 
-	out := extractJSONArray(stdout.Bytes())
-	if len(out) == 0 || out[0] != '[' {
-		// No comments is a valid, readable answer — the candidate is simply
-		// unprotected by authorship.
-		return false, true
-	}
-	var comments []struct {
-		Author string `json:"author"`
-	}
-	if err := json.Unmarshal(out, &comments); err != nil {
-		return false, false
-	}
-	for _, c := range comments {
-		if wispaudit.IsComplianceSeatAuthor(c.Author) {
-			return true, true
-		}
-	}
-	return false, true
+	return wispaudit.CommentsProtected(stdout.Bytes())
 }
 
 // extractJSONArray finds the first '[' in raw output that may carry a non-JSON

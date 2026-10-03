@@ -1,6 +1,10 @@
 package wispaudit
 
-import "strings"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 // Protected-bead rules for implicit wisp purges (gt-12f / cl-kf00).
 //
@@ -55,4 +59,36 @@ func AnyComplianceSeatAuthor(authors []string) bool {
 		}
 	}
 	return false
+}
+
+// CommentsProtected parses the raw output of `bd comments <id> --json` and
+// reports whether any comment author is a compliance seat (protected), and
+// whether the output could be read as a comment list at all (readable).
+//
+// Callers MUST treat readable=false as "do not purge" — never as "not
+// protected". An empty, well-formed JSON array ("[]" or prose a caller has
+// already recognized as "no comments") is the one case this function treats
+// as readable with nothing found; anything else that doesn't parse as a JSON
+// array of comments is an unknown state, not a safe one (gt-12f round 2: a
+// prior version of this check treated any non-array output as "no comments",
+// which let an actually-unreadable candidate through as unprotected).
+func CommentsProtected(raw []byte) (protected, readable bool) {
+	raw = bytes.TrimSpace(raw)
+	start := bytes.IndexByte(raw, '[')
+	if start < 0 {
+		return false, false
+	}
+	raw = raw[start:]
+	var comments []struct {
+		Author string `json:"author"`
+	}
+	if err := json.Unmarshal(raw, &comments); err != nil {
+		return false, false
+	}
+	for _, c := range comments {
+		if IsComplianceSeatAuthor(c.Author) {
+			return true, true
+		}
+	}
+	return false, true
 }
