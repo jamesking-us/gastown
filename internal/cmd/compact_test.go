@@ -322,6 +322,9 @@ case "$1" in
   delete)
     exit 0
     ;;
+  show)
+    echo '[]'
+    ;;
   *)
     echo "unexpected bd command: $*" >&2
     exit 1

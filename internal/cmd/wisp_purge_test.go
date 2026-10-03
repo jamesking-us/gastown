@@ -415,6 +415,7 @@ case "$1" in
     f=%q/"$2".json
     if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
     ;;
+  show) echo '[]' ;;
   *) : ;;
 esac
 `, logPath, dataPath, commentsDir)
