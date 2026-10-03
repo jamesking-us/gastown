@@ -253,6 +253,24 @@ esac
 	}
 }
 
+func TestConfirmedNoIssuesFoundMatchesRealBDShowShape(t *testing.T) {
+	if !confirmedNoIssuesFound([]byte(`{"error":"no issues found matching the supplied IDs"}`), []byte("no issue found\n")) {
+		t.Fatal("real bd all-missing output was not recognized")
+	}
+	for _, tc := range []struct {
+		stdout string
+		stderr string
+	}{
+		{`{"error":"database unavailable"}`, "no issue found"},
+		{`{"error":"no issues found"}`, "dolt unavailable"},
+		{`[]`, "no issue found"},
+	} {
+		if confirmedNoIssuesFound([]byte(tc.stdout), []byte(tc.stderr)) {
+			t.Fatalf("unexpected confirmed-gone result for stdout=%q stderr=%q", tc.stdout, tc.stderr)
+		}
+	}
+}
+
 // survivorBD simulates the cl-wisp-0u30 shape: bd purge reports success, but
 // the wisp is still present when re-queried afterward. The post-delete
 // verification this backs must name the survivor rather than trusting the

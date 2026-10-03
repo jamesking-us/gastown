@@ -615,6 +615,9 @@ func protectedFromDeletion(bd *beads.Beads, w *compactIssue) (protected bool, re
 	if wispaudit.HasProtectedLabel(w.Labels) {
 		return true, "merge-request label"
 	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+		return true, "compliance mail author"
+	}
 	if w.CommentCount == 0 {
 		return false, ""
 	}

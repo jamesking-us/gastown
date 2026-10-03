@@ -409,6 +409,10 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 			kept++
 			continue
 		}
+		if wispaudit.HasComplianceMailAuthorLabel(cycle.Labels) {
+			kept++
+			continue
+		}
 		if cycle.CommentCount > 0 {
 			out, err := exec.Command("bd", "comments", cycle.ID, "--json").Output()
 			if err != nil {

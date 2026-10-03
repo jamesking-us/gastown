@@ -129,6 +129,9 @@ func isEvidenceBearing(w *purgeCandidate) bool {
 	if wispaudit.HasProtectedLabel(w.Labels) {
 		return true
 	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+		return true
+	}
 	for _, label := range w.Labels {
 		if label == "keep" || label == "gt:keep" {
 			return true
@@ -302,6 +305,10 @@ func planUnscopedPurge(bd *beads.Beads) ([]wispaudit.Wisp, purgeExclusion, error
 		}
 		if wispaudit.HasProtectedLabel(w.Labels) {
 			excluded.mergeRequest++
+			continue
+		}
+		if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+			excluded.compliance++
 			continue
 		}
 		if w.CommentCount > 0 {
@@ -500,6 +507,9 @@ func wispStillDeleteEligible(bd *beads.Beads, id string) (bool, error) {
 		return false, nil
 	}
 	if wispaudit.HasProtectedLabel(w.Labels) {
+		return false, nil
+	}
+	if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
 		return false, nil
 	}
 	if w.CommentCount == 0 {

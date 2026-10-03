@@ -954,6 +954,10 @@ func planClosedEphemeralPurge(env []string, workDir string) ([]wispaudit.Wisp, p
 			excluded.mergeRequest++
 			continue
 		}
+		if wispaudit.HasComplianceMailAuthorLabel(w.Labels) {
+			excluded.compliance++
+			continue
+		}
 		if w.CommentCount > 0 {
 			protected, readable := wispCommentsAreProtected(env, workDir, w.ID, w.CommentCount)
 			if !readable {
