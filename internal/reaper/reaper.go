@@ -658,7 +658,15 @@ func previewClosedWispIDs(ctx context.Context, db *sql.DB, cutoff time.Time) ([]
 // present. A reported RowsAffected count is not the same as a row being gone
 // (the cl-wisp-0u30 shape: a wisp named in 202 "completed" purge events that
 // was never actually removed) — this is the check that would have caught it.
-func verifyWispsGone(ctx context.Context, db *sql.DB, ids []string) ([]string, error) {
+// sqlReadWriter is satisfied by both *sql.DB and a pinned *sql.Conn. The
+// latter is required when a purge changes connection-local transaction state:
+// planning, deletion, and verification must observe one connection.
+type sqlReadWriter interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func verifyWispsGone(ctx context.Context, db sqlReadWriter, ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -730,11 +738,19 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		return digestTotal, previewIDs, anomalies, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+	// @@autocommit is connection-local. Pin the entire mutating sequence so
+	// the planned IDs, DELETEs, verification read, and COMMIT cannot hop
+	// between pooled connections and falsely certify rows from another view.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("acquire purge connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
 		return 0, nil, nil, fmt.Errorf("disable autocommit: %w", err)
 	}
 	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
 	// Batch delete — simple status+age filter plus the protected-bead
@@ -757,21 +773,29 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		db:    dbName,
 	}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
+	totalDeleted, err := batchDeleteRows(ctx, conn, idQuery, deleteCutoff, "wisps", auxTables, deletionLog.planBatch)
 	if totalDeleted > 0 {
-		if survivors, verifyErr := verifyWispsGone(ctx, db, wispaudit.IDs(deletionLog.planned)); verifyErr != nil {
+		verifiedGone := deletionLog.planned
+		var verificationFailures []string
+		if survivors, verifyErr := verifyWispsGone(ctx, conn, wispaudit.IDs(deletionLog.planned)); verifyErr != nil {
 			anomalies = append(anomalies, Anomaly{
 				Type:    "purge_verify_failed",
 				Message: fmt.Sprintf("could not confirm deletion: %v", verifyErr),
 			})
+			verifiedGone = nil
+			verificationFailures = append(verificationFailures, "post-delete verification: "+verifyErr.Error())
 		} else if len(survivors) > 0 {
 			anomalies = append(anomalies, Anomaly{
 				Type:    "purge_survivors",
 				Message: fmt.Sprintf("still present after purge: %s", strings.Join(survivors, ", ")),
 				Count:   len(survivors),
 			})
+			verifiedGone = wispsWithoutIDs(verifiedGone, survivors)
+			for _, id := range survivors {
+				verificationFailures = append(verificationFailures, id+": still present after purge")
+			}
 		}
-		deletionLog.completed(totalDeleted)
+		deletionLog.completed(verifiedGone, verificationFailures, map[string]interface{}{"deleted_rows": totalDeleted})
 	}
 	if err != nil {
 		return totalDeleted, nil, anomalies, err
@@ -779,7 +803,7 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 
 	if totalDeleted > 0 {
 		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			anomalies = append(anomalies, Anomaly{
 				Type:    "sql_commit_failed",
 				Message: fmt.Sprintf("sql commit after purge failed: %v", err),
@@ -787,7 +811,7 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 			return totalDeleted, nil, anomalies, nil
 		}
 		commitMsg := fmt.Sprintf("reaper: purge %d closed wisps from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// Non-fatal — log but continue.
 			anomalies = append(anomalies, Anomaly{
 				Type:    "dolt_commit_failed",
@@ -803,9 +827,8 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 // (hq-6ewp). Every batch is named in <town>/.events.jsonl before it is deleted,
 // and a batch whose record will not write is not deleted.
 //
-// It accumulates what it planned so the closing record can name the whole set
-// rather than just count it — the question asked afterwards is always "which
-// wisps went", and by then there is nothing left to ask.
+// It accumulates what it planned so verification can distinguish the rows it
+// proved absent from survivors. The closing record names only the former.
 type wispDeletionLog struct {
 	actor string
 	// path names the deleter for the audit record (wispaudit.Path*). Explicit
@@ -818,12 +841,12 @@ type wispDeletionLog struct {
 	// titleLookup resolves ids to titles for the record. Defaults to
 	// lookupWispTitles (the `wisps` table) when nil; purgeOldMail supplies one
 	// that reads `issues` instead.
-	titleLookup func(context.Context, *sql.DB, []string) []wispaudit.Wisp
+	titleLookup func(context.Context, sqlReadWriter, []string) []wispaudit.Wisp
 	planned     []wispaudit.Wisp
 }
 
 // planBatch records one batch and reports whether the delete may proceed.
-func (l *wispDeletionLog) planBatch(ctx context.Context, db *sql.DB, ids []string) error {
+func (l *wispDeletionLog) planBatch(ctx context.Context, db sqlReadWriter, ids []string) error {
 	lookup := l.titleLookup
 	if lookup == nil {
 		lookup = lookupWispTitles
@@ -839,16 +862,33 @@ func (l *wispDeletionLog) planBatch(ctx context.Context, db *sql.DB, ids []strin
 // completed writes the closing record. Best-effort: the delete has happened and
 // the planned records already name every id, so a failure here loses the
 // outcome, not the evidence.
-func (l *wispDeletionLog) completed(deleted int) {
-	_ = wispaudit.Completed(l.actor, l.path, l.scope, l.db, l.planned, nil,
-		map[string]interface{}{"deleted_rows": deleted})
+func (l *wispDeletionLog) completed(verified []wispaudit.Wisp, failures []string, extra map[string]interface{}) {
+	if len(failures) > 0 {
+		_ = wispaudit.Partial(l.actor, l.path, l.scope, l.db, verified, failures, extra)
+		return
+	}
+	_ = wispaudit.Completed(l.actor, l.path, l.scope, l.db, verified, nil, extra)
+}
+
+func wispsWithoutIDs(wisps []wispaudit.Wisp, excluded []string) []wispaudit.Wisp {
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, id := range excluded {
+		excludedSet[id] = struct{}{}
+	}
+	verified := make([]wispaudit.Wisp, 0, len(wisps))
+	for _, w := range wisps {
+		if _, found := excludedSet[w.ID]; !found {
+			verified = append(verified, w)
+		}
+	}
+	return verified
 }
 
 // lookupWispTitles fills in the titles for a batch of ids. A title is what makes
 // a deletion record legible to a human afterwards, but it is not what makes it
 // valid: if the lookup fails the ids are recorded without titles rather than the
 // batch going unrecorded, because an id-only record still names what was lost.
-func lookupWispTitles(ctx context.Context, db *sql.DB, ids []string) []wispaudit.Wisp {
+func lookupWispTitles(ctx context.Context, db sqlReadWriter, ids []string) []wispaudit.Wisp {
 	fallback := wispaudit.WispsFromIDs(ids)
 	if len(ids) == 0 {
 		return fallback
@@ -889,8 +929,8 @@ func lookupWispTitles(ctx context.Context, db *sql.DB, ids []string) []wispaudit
 // lookupMailTitles is purgeOldMail's titleLookup: mail lives in the
 // db-qualified `issues` table, not the bare `wisps` table lookupWispTitles
 // reads, so it needs its own query rather than reusing that one.
-func lookupMailTitles(dbName string) func(context.Context, *sql.DB, []string) []wispaudit.Wisp {
-	return func(ctx context.Context, db *sql.DB, ids []string) []wispaudit.Wisp {
+func lookupMailTitles(dbName string) func(context.Context, sqlReadWriter, []string) []wispaudit.Wisp {
+	return func(ctx context.Context, db sqlReadWriter, ids []string) []wispaudit.Wisp {
 		fallback := wispaudit.WispsFromIDs(ids)
 		if len(ids) == 0 {
 			return fallback
@@ -994,7 +1034,7 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 
 	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables, mailLog.planBatch)
 	if totalDeleted > 0 {
-		mailLog.completed(totalDeleted)
+		mailLog.completed(mailLog.planned, nil, map[string]interface{}{"deleted_rows": totalDeleted})
 	}
 	if err != nil {
 		return totalDeleted, nil, err
@@ -1146,7 +1186,7 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, *sql.DB, []string) error) (int, error) {
+func batchDeleteRows(ctx context.Context, db sqlReadWriter, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, record func(context.Context, sqlReadWriter, []string) error) (int, error) {
 	totalDeleted := 0
 	for {
 		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)
