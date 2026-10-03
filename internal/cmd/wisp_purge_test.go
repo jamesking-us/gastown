@@ -194,10 +194,10 @@ func TestPurgeOwnClosedWispsDeletesOnlyItsOwnMolecule(t *testing.T) {
 			deletes = append(deletes, c)
 		}
 	}
-	if len(deletes) != 1 {
-		t.Fatalf("expected exactly one delete call, got %v", deletes)
+	if len(deletes) != 2 {
+		t.Fatalf("expected one rechecked delete per owned wisp, got %v", deletes)
 	}
-	got := deletes[0]
+	got := strings.Join(deletes, " ")
 	for _, want := range []string{"cl-wisp-root", "cl-wisp-step1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("delete call %q is missing own closed wisp %q", got, want)

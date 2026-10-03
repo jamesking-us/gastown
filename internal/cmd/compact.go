@@ -301,7 +301,16 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 			if shouldPromote && !isMoleculeStep {
 				promoteWisp(bd, w, "proven value", result, opts)
 			} else if age > ttl {
-				deleteWisp(bd, w, "TTL expired", result, audit, opts)
+				// Re-read at the destructive boundary; the earlier scan is only
+				// a plan and a candidate may have reopened or gained protection.
+				current, recheckErr := compactDeleteCandidateNow(bd, w.ID)
+				if recheckErr != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("delete %s: re-check before delete: %v", w.ID, recheckErr))
+				} else if current == nil {
+					result.Skipped++
+				} else {
+					deleteWisp(bd, current, "TTL expired", result, audit, opts)
+				}
 			} else {
 				result.Skipped++
 				if opts.Verbose && !opts.Quiet {
@@ -321,6 +330,19 @@ func performCompaction(opts compactOptions) (*compactResult, error) {
 	}
 
 	return result, nil
+}
+
+func compactDeleteCandidateNow(bd *beads.Beads, id string) (*compactIssue, error) {
+	all, err := listWisps(bd)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range all {
+		if w.ID == id {
+			return w, nil
+		}
+	}
+	return nil, nil
 }
 
 // cleanOrphanedWispDeps removes wisp_dependencies rows where either side no
@@ -446,26 +468,6 @@ type compactAudit struct {
 // is a batch record that can be minutes stale by the time the delete it
 // describes actually happens.
 func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult, audit compactAudit, opts compactOptions) {
-	// The compaction scan is only a plan. Re-read the exact candidate at the
-	// delete boundary so a reopened, newly protected, or newly closed wisp is
-	// not deleted from stale state.
-	all, err := listWisps(bd)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: re-check before delete: %v", w.ID, err))
-		return
-	}
-	var current *compactIssue
-	for _, candidate := range all {
-		if candidate.ID == w.ID {
-			current = candidate
-			break
-		}
-	}
-	if current == nil {
-		result.Skipped++
-		return
-	}
-	w = current
 	if w.Status != "closed" {
 		result.Skipped++
 		return
@@ -515,7 +517,7 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
-	_, err = bd.Run("delete", w.ID, "--force")
+	_, err := bd.Run("delete", w.ID, "--force")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: %v", w.ID, err))
 		return
