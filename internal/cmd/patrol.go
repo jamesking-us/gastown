@@ -79,12 +79,14 @@ type PatrolDigest struct {
 
 // PatrolCycleEntry represents a single patrol cycle in the digest.
 type PatrolCycleEntry struct {
-	ID          string    `json:"id"`
-	Role        string    `json:"role"`         // deacon, witness, refinery
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	ClosedAt    time.Time `json:"closed_at,omitempty"`
+	ID           string    `json:"id"`
+	Role         string    `json:"role"` // deacon, witness, refinery
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	CreatedAt    time.Time `json:"created_at"`
+	ClosedAt     time.Time `json:"closed_at,omitempty"`
+	Labels       []string  `json:"labels,omitempty"`
+	CommentCount int       `json:"comment_count,omitempty"`
 }
 
 // runPatrolDigest aggregates patrol cycle digests into a daily digest bead.
@@ -202,13 +204,15 @@ func queryPatrolDigests(targetDate time.Time) ([]PatrolCycleEntry, error) {
 	}
 
 	var issues []struct {
-		ID          string    `json:"id"`
-		Title       string    `json:"title"`
-		Description string    `json:"description"`
-		Status      string    `json:"status"`
-		CreatedAt   time.Time `json:"created_at"`
-		ClosedAt    time.Time `json:"closed_at"`
-		Ephemeral   bool      `json:"ephemeral"`
+		ID           string    `json:"id"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		Status       string    `json:"status"`
+		CreatedAt    time.Time `json:"created_at"`
+		ClosedAt     time.Time `json:"closed_at"`
+		Ephemeral    bool      `json:"ephemeral"`
+		Labels       []string  `json:"labels,omitempty"`
+		CommentCount int       `json:"comment_count,omitempty"`
 	}
 
 	if err := json.Unmarshal(listOutput, &issues); err != nil {
@@ -239,12 +243,14 @@ func queryPatrolDigests(targetDate time.Time) ([]PatrolCycleEntry, error) {
 		role := extractPatrolRole(issue.Title)
 
 		patrolDigests = append(patrolDigests, PatrolCycleEntry{
-			ID:          issue.ID,
-			Role:        role,
-			Title:       issue.Title,
-			Description: issue.Description,
-			CreatedAt:   issue.CreatedAt,
-			ClosedAt:    issue.ClosedAt,
+			ID:           issue.ID,
+			Role:         role,
+			Title:        issue.Title,
+			Description:  issue.Description,
+			CreatedAt:    issue.CreatedAt,
+			ClosedAt:     issue.ClosedAt,
+			Labels:       issue.Labels,
+			CommentCount: issue.CommentCount,
 		})
 	}
 
@@ -376,12 +382,37 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 		return 0, nil
 	}
 
-	// Collect IDs to delete
+	// Collect IDs to delete. Patrol digests are not expected to carry the
+	// merge-request label or compliance comments — they're a structurally
+	// different wisp_type — but gt-12f round 2 asks every delete path to
+	// apply the same exclusion, not just the ones known to need it, so a
+	// future change that lets a digest carry a comment doesn't silently
+	// reopen this one.
 	var idsToDelete []string
 	doomed := make([]wispaudit.Wisp, 0, len(cycles))
+	var kept int
 	for _, cycle := range cycles {
+		if wispaudit.HasProtectedLabel(cycle.Labels) {
+			kept++
+			continue
+		}
+		if cycle.CommentCount > 0 {
+			out, err := exec.Command("bd", "comments", cycle.ID, "--json").Output()
+			if err != nil {
+				kept++
+				continue // unreadable: fail closed, keep it
+			}
+			if protected, readable := wispaudit.CommentsProtected(out); !readable || protected {
+				kept++
+				continue
+			}
+		}
 		idsToDelete = append(idsToDelete, cycle.ID)
 		doomed = append(doomed, wispaudit.Wisp{ID: cycle.ID, Title: cycle.Title})
+	}
+
+	if len(doomed) == 0 {
+		return 0, nil
 	}
 
 	scope := "digest_date:" + targetDate.UTC().Format("2006-01-02")
@@ -390,7 +421,11 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 	// database, so GT_RIG is the best name available for where these went. It
 	// can be empty, and an empty db field is honest about that.
 	db := os.Getenv("GT_RIG")
-	if err := wispaudit.Plan(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil); err != nil {
+	var extra map[string]interface{}
+	if kept > 0 {
+		extra = map[string]interface{}{"kept_protected": kept}
+	}
+	if err := wispaudit.Plan(actor, wispaudit.PathPatrolDigest, scope, db, doomed, extra); err != nil {
 		return 0, fmt.Errorf("not deleting %d patrol digests: the deletion could not be recorded first: %w",
 			len(doomed), err)
 	}
@@ -402,7 +437,7 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 		return 0, fmt.Errorf("deleting patrol digests: %w", err)
 	}
 
-	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil, nil)
+	_ = wispaudit.Completed(actor, wispaudit.PathPatrolDigest, scope, db, doomed, nil, extra)
 
 	return len(idsToDelete), nil
 }

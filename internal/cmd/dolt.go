@@ -1592,6 +1592,7 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 	// GC phase: purge closed ephemeral beads (requires running server).
 	purgeResults := make(map[string]struct {
 		purged int
+		ids    []string
 		err    error
 	})
 	if doltSyncGC {
@@ -1606,11 +1607,24 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 					if doltSyncDB != "" && db != doltSyncDB {
 						continue
 					}
-					purged, purgeErr := doltserver.PurgeClosedEphemerals(townRoot, db, wispaudit.PathDoltSyncGC, doltSyncDry)
+					if doltSyncDry {
+						// gt-12f: a dry run shows the exact candidate list, not
+						// just a count, via the same filtered set the real
+						// purge below would act on.
+						wisps, _, previewErr := doltserver.PreviewClosedEphemeralsPurge(townRoot, db)
+						purgeResults[db] = struct {
+							purged int
+							ids    []string
+							err    error
+						}{len(wisps), wispaudit.IDs(wisps), previewErr}
+						continue
+					}
+					purged, purgeErr := doltserver.PurgeClosedEphemerals(townRoot, db, wispaudit.PathDoltSyncGC, false)
 					purgeResults[db] = struct {
 						purged int
+						ids    []string
 						err    error
-					}{purged, purgeErr}
+					}{purged, nil, purgeErr}
 				}
 			}
 		}
@@ -1654,6 +1668,9 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 						verb = "would purge"
 					}
 					fmt.Printf("  %s %s gc: %s %d closed ephemeral bead(s)\n", style.Bold.Render("✓"), r.Database, verb, pr.purged)
+					for _, id := range pr.ids {
+						fmt.Printf("      %s\n", id)
+					}
 					totalPurged += pr.purged
 				}
 			}

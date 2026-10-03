@@ -52,6 +52,11 @@ const (
 	PathMaintain = "gt maintain: pre-push purge"
 	// PathReaper is the reaper purge, from the daemon patrol or gt reaper purge.
 	PathReaper = "reaper: purge closed wisps"
+	// PathReaperMail is the reaper purging old closed mail from `issues`. Mail
+	// rows are not in dolt_ignore (they're in the committed `issues` table), so
+	// this one has Dolt history behind it — but gt-12f round 2 still asks for
+	// at least an audit record here, for consistency with every other deleter.
+	PathReaperMail = "reaper: purge old mail"
 	// PathPatrolDigest is gt patrol removing a day's digest wisps.
 	PathPatrolDigest = "gt patrol: digest cleanup"
 )

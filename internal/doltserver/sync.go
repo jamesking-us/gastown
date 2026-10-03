@@ -917,6 +917,14 @@ func (e purgeExclusion) asExtra(extra map[string]interface{}) {
 	}
 }
 
+// MergeRequestCount, ComplianceCount, and UnreadableCount expose the counts
+// kept by this exclusion to callers outside this package (e.g. dry-run
+// preview rendering in cmd/maintain.go, cmd/dolt.go), without exporting the
+// struct's fields directly.
+func (e purgeExclusion) MergeRequestCount() int { return e.mergeRequest }
+func (e purgeExclusion) ComplianceCount() int   { return e.compliance }
+func (e purgeExclusion) UnreadableCount() int   { return e.unreadable }
+
 // planClosedEphemeralPurge names the wisps this GC purge is expected to
 // remove from this database, for the deletion record, and excludes any that
 // gt-12f/cl-kf00 protects: a bead labelled gt:merge-request, or carrying a

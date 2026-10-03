@@ -443,6 +443,21 @@ type compactAudit struct {
 // is a batch record that can be minutes stale by the time the delete it
 // describes actually happens.
 func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult, audit compactAudit, opts compactOptions) {
+	// gt-12f/cl-kf00: a molecule step with a Parent is never promoted (see the
+	// caller), so a closed, past-TTL molecule step carrying a compliance
+	// comment used to reach this function and be deleted anyway — the comment
+	// protection only ran as part of the promotion decision. Check it here
+	// instead, where every delete actually goes through, regardless of why the
+	// caller decided to delete rather than promote.
+	if protected, why := protectedFromDeletion(bd, w); protected {
+		result.Skipped++
+		if opts.Verbose && !opts.Quiet {
+			fmt.Printf("  %s skip  %s %s (%s)\n",
+				style.Dim.Render("protected"), w.ID, compactTruncate(w.Title, 40), why)
+		}
+		return
+	}
+
 	action := compactAction{ID: w.ID, Title: w.Title, Reason: reason, WispType: w.WispType}
 
 	if opts.DryRun {
@@ -526,6 +541,32 @@ func compactTruncate(s string, maxLen int) string {
 		return string([]rune(s)[:maxLen])
 	}
 	return string([]rune(s)[:maxLen-3]) + "..."
+}
+
+// protectedFromDeletion reports whether w must never be deleted by
+// compaction, independent of the TTL/promotion decision that routed it here:
+// a merge-request bead, or one carrying a compliance-seat comment (gt-12f/
+// cl-kf00). Fails closed — a candidate whose comments cannot be read is kept,
+// never deleted on an unknown protection state.
+func protectedFromDeletion(bd *beads.Beads, w *compactIssue) (protected bool, reason string) {
+	if wispaudit.HasProtectedLabel(w.Labels) {
+		return true, "merge-request label"
+	}
+	if w.CommentCount == 0 {
+		return false, ""
+	}
+	out, err := bd.Run("comments", w.ID, "--json")
+	if err != nil {
+		return true, "comments unreadable"
+	}
+	isProtected, readable := wispaudit.CommentsProtected(out)
+	if !readable {
+		return true, "comments unreadable"
+	}
+	if isProtected {
+		return true, "compliance-seat comment"
+	}
+	return false, ""
 }
 
 // hasComments checks the comment_count on the compactIssue.

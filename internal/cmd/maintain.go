@@ -136,6 +136,44 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
 
 	if maintainDryRun {
+		// gt-12f: a dry run must show the exact purge candidate list, not just
+		// a count, so the reap phase's effect is discoverable before the real
+		// run. Uses the same planClosedEphemeralPurge candidate set the real
+		// reap phase below acts on, so this cannot drift from it.
+		fmt.Printf("\n%s Reap preview (closed ephemeral beads):\n", style.Bold.Render("●"))
+		anyCandidates := false
+		for _, db := range dbInfos {
+			wisps, excluded, err := doltserver.PreviewClosedEphemeralsPurge(townRoot, db.name)
+			if err != nil {
+				fmt.Printf("  %s %s: could not list candidates: %v\n", style.Warning.Render("!"), db.name, err)
+				continue
+			}
+			if len(wisps) == 0 {
+				continue
+			}
+			anyCandidates = true
+			fmt.Printf("  %s: %d wisp(s)\n", db.name, len(wisps))
+			for _, w := range wisps {
+				title := w.Title
+				if title == "" {
+					title = "(no title)"
+				}
+				fmt.Printf("      %s %s\n", w.ID, title)
+			}
+			if n := excluded.MergeRequestCount(); n > 0 {
+				fmt.Printf("      %s kept %d merge-request bead(s)\n", style.Dim.Render("○"), n)
+			}
+			if n := excluded.ComplianceCount(); n > 0 {
+				fmt.Printf("      %s kept %d compliance-commented bead(s)\n", style.Dim.Render("○"), n)
+			}
+			if n := excluded.UnreadableCount(); n > 0 {
+				fmt.Printf("      %s kept %d bead(s) with unreadable comments (failed closed)\n", style.Dim.Render("○"), n)
+			}
+		}
+		if !anyCandidates {
+			fmt.Printf("  (nothing to reap)\n")
+		}
+
 		fmt.Printf("\n%s Dry run complete — no changes made\n", style.Dim.Render("ℹ"))
 		return nil
 	}

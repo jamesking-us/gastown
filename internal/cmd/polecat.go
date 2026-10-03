@@ -2126,7 +2126,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			// per rig — the purge is rig-wide, not per-polecat.
 			if !dryRunPurgePreviewed[p.r.Path] {
 				dryRunPurgePreviewed[p.r.Path] = true
-				displayDryRunWispPurge(p.r)
+				displayDryRunWispPurge(p.r, polecatNukePurgeWisps)
 			}
 
 			fmt.Println()
@@ -2190,11 +2190,13 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 }
 
 // displayDryRunWispPurge prints the database-wide wisp purge preview for a
-// rig under `gt polecat nuke --dry-run`. Without --purge-closed-wisps, nuke
-// never touches the rig's wisps at all, and says so rather than staying
-// silent about a destructive action an operator might assume still happens.
-func displayDryRunWispPurge(r *rig.Rig) {
-	if !polecatNukePurgeWisps {
+// rig under `gt polecat nuke --dry-run` and `gt polecat stale --cleanup
+// --dry-run` (same underlying purgeClosedEphemeralBeads path — gt-12f round 2
+// item 6). Without --purge-closed-wisps, nuke never touches the rig's wisps
+// at all, and says so rather than staying silent about a destructive action
+// an operator might assume still happens.
+func displayDryRunWispPurge(r *rig.Rig, purgeWisps bool) {
+	if !purgeWisps {
 		fmt.Printf("  - Wisp purge: skipped (pass --purge-closed-wisps to also purge closed wisps older than %s)\n", unscopedPurgeMinAge)
 		return
 	}
@@ -2229,16 +2231,13 @@ func dryRunNukeSummary(total, blocked int) string {
 	return fmt.Sprintf("Would nuke %d polecat(s).", total)
 }
 
-// nukePolecatFull performs the complete cleanup sequence for a single polecat:
+// nukePolecatFullWithOptions performs the complete cleanup sequence for a
+// single polecat:
 // 1. Kill tmux session
 // 2. Delete worktree (via RemoveWithOptions with nuclear=true)
 // 3. Delete git branch
 // 4. Close agent bead
 // This is the canonical cleanup path used by both `polecat nuke` and `polecat stale --cleanup`.
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig) error {
-	return nukePolecatFullWithOptions(polecatName, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: true})
-}
-
 type nukePolecatOptions struct {
 	Force                 bool
 	PurgeClosedEphemerals bool
@@ -2547,6 +2546,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 					fmt.Printf("  - %s: %s\n", info.Name, info.Reason)
 				}
 			}
+			displayDryRunWispPurge(r, polecatStalePurgeWisps)
 		} else {
 			fmt.Printf("Cleaning up %d stale polecat(s)...\n", staleCount)
 			nuked := 0
