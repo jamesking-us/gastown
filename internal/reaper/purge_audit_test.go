@@ -238,6 +238,16 @@ func (c *fakePurgeConn) QueryContext(_ context.Context, query string, _ []driver
 		}
 		return &fakePurgeRows{cols: []string{"id", "title"}, rows: rows}, nil
 
+	// The primary DELETE is followed by a current-state read so auxiliary
+	// evidence is only cleaned for rows actually deleted.
+	case strings.Contains(q, "SELECT id FROM `wisps` WHERE id IN"):
+		ids := c.state.idsLocked()
+		rows := make([][]driver.Value, len(ids))
+		for i, id := range ids {
+			rows[i] = []driver.Value{id}
+		}
+		return &fakePurgeRows{cols: []string{"id"}, rows: rows}, nil
+
 	// Mail purge: nothing to do, and not this test's subject.
 	case strings.Contains(q, "SELECT COUNT(*)"):
 		return &fakePurgeRows{cols: []string{"count"}, rows: [][]driver.Value{{int64(0)}}}, nil
