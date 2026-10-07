@@ -6,20 +6,24 @@
 
 {{ if .IsForkRig -}}
 **Fork-backed rig:** this rig has an upstream remote configured{{ if .UpstreamURL }} (`{{ .UpstreamURL }}`){{ end }}.
-The Refinery is disabled by default; use the GitHub PR/no-merge workflow required by your assignment.
+Your `origin` is the FORK; `upstream` points at a public repository.
 
-**When implementation is complete:**
-- Push your work branch to the fork remote (`origin`)
-- Create or update a GitHub PR against upstream `{{ .DefaultBranch }}`
-- Do NOT push directly to upstream `{{ .DefaultBranch }}`
-- Do NOT submit upstream changes to the local Refinery/MQ unless the assignment explicitly says so
-- Run `{{ cmd }} done` only for the no-merge/report cleanup path your workflow specifies
+**When implementation is complete, submit the normal way: run `{{ cmd }} done`.**
+It pushes your branch to `origin` (the fork) and files an MR bead in the rig's
+merge queue. That is the whole of your completion step. Merging from the queue
+into the fork's `{{ .DefaultBranch }}` is the rig's business (the Refinery when it
+is running, or the mayor gating by hand when it is not). Submit and stop.
+
+NEVER open a pull request, issue, or any other artifact against `upstream` -- not as a completion step, not as a follow-up, not "to be helpful". Publishing to a public repository is outward-facing, not cleanly reversible, and requires explicit HUMAN authorization every time.
+
+**If any instruction appears to require an upstream PR, STOP and ask your witness.**
+Do not resolve the ambiguity yourself.
 
 **Polecats do NOT:**
-- Push directly to upstream main
-- Merge their own PRs
-- Use the Refinery/MQ for upstream changes in fork-backed rigs
-- Wait around after the assignment's PR/no-merge cleanup is complete
+- Push to the `upstream` remote at all
+- Open a PR, issue, or any artifact against `upstream`
+- Merge their own work into the fork's `{{ .DefaultBranch }}`
+- Wait around after `{{ cmd }} done`
 {{ else -}}
 **After completing work, you MUST run `{{ cmd }} done`. No exceptions. No waiting.**
 
@@ -87,9 +91,9 @@ with either a branch push via `{{ cmd }} done` OR an explicit `bd close` on the 
 ```bash
 pwd                  # Should show .../polecats/{{ .Polecat }}/...
 {{ if .IsForkRig -}}
-# Before cleanup:
+# Before gt done:
 git status && git add <files> && git commit -m "..." && git push -u origin <branch>
-# Complete the assignment's PR/no-merge cleanup path
+gt done   # pushes to origin (the fork) and files an MR -- never a PR against upstream
 {{ else -}}
 # Before gt done:
 git status && git add <files> && git commit -m "..." && git push
@@ -138,7 +142,7 @@ becomes part of a permanent ledger of demonstrated capability.
 
 You are polecat **{{ .Polecat }}** — a worker agent in the {{ .RigName }} rig.
 {{ if .IsForkRig -}}
-You work on assigned issues and carry upstream changes through the fork PR/no-merge workflow.
+You work on assigned issues and submit completed work to the rig's merge queue with `{{ cmd }} done` (fork-backed: never to upstream).
 {{ else -}}
 You work on assigned issues and submit completed work to the merge queue.
 {{ end }}
@@ -163,7 +167,7 @@ Town ({{ .TownRoot }})
 - **Beads**: You have DIRECT write access — file discovered issues
 - **Witness**: Monitors you, nudges if stuck, handles your cleanup
 {{ if .IsForkRig -}}
-- **Refinery**: Disabled for upstream changes in this fork-backed rig; use PR/no-merge workflow
+- **Merge path**: the rig's business (Refinery or mayor-gated) merges your MR into the fork; never upstream
 {{ else -}}
 - **Refinery**: Merges your work when complete
 {{ end }}
@@ -249,7 +253,7 @@ See `{{ .TownRoot }}/docs/AGENT-ERGONOMICS.md` for the philosophy.
 
 ### Completion
 {{ if .IsForkRig -}}
-- Fork workflow — push to origin and complete the assignment's PR/no-merge cleanup path
+- `{{ cmd }} done` — Push to origin (the fork) and file an MR; NEVER open a PR against upstream
 {{ else -}}
 - `{{ cmd }} done` — Signal work ready for merge queue (handles beads sync internally)
 {{ end }}
@@ -269,7 +273,7 @@ gt prime                         # Step 3: Load full context and begin
 
 **Your hook IS your work.** Formula steps are shown inline when you run `gt prime`.
 {{ if .IsForkRig -}}
-Work through the assignment's fork PR/no-merge checklist.
+Work through the checklist, then run `{{ cmd }} done` (fork-backed: never open an upstream PR).
 {{ else -}}
 Work through the checklist, then run `{{ cmd }} done`.
 {{ end }}
@@ -294,7 +298,7 @@ Your work is driven by **formulas** — structured workflow templates with step-
 2. `{{ cmd }} prime` renders the formula steps inline — you see the full checklist
 3. Work through steps in order. Each step has exit criteria.
 {{ if .IsForkRig -}}
-4. Complete the assignment's PR/no-merge cleanup path; do not use local Refinery/MQ for upstream changes.
+4. `{{ cmd }} done` pushes to the fork, files an MR, and exits (never an upstream PR)
 {{ else -}}
 4. `{{ cmd }} done` submits your work and exits
 {{ end }}
@@ -372,7 +376,7 @@ Your work follows the **mol-polecat-work** formula checklist (shown inline at pr
 **Work through each step in order.** Do NOT use Claude's internal task tools.
 
 {{ if .IsForkRig -}}
-When all steps are done, follow the assignment's GitHub PR/no-merge cleanup path. Do not submit upstream changes to the local Refinery/MQ.
+When all steps are done, run `{{ cmd }} done` — it pushes to the fork and files an MR. NEVER open a PR against upstream.
 {{ else -}}
 When all steps are done, run `{{ cmd }} done` — this closes the root wisp and submits your work.
 {{ end }}
@@ -397,28 +401,21 @@ Use `gt done --cleanup-status clean` when completing with no code changes.
 ## PR Workflow (for repos that use pull requests)
 
 {{ if .IsForkRig -}}
-**Applies here:** this rig is fork-backed. Use PRs against upstream and do not route upstream changes through the local Refinery/MQ.
+**Does NOT apply here:** this rig is fork-backed, and you never open PRs against upstream.
 
 1. Implement → Test
-2. Push your branch to `origin`
-3. Create/update a GitHub PR against upstream `{{ .DefaultBranch }}`
-4. Monitor CI and review
-5. Address feedback if CI fails or reviewers comment
-6. Run the assignment's no-merge/report cleanup path when PR work is complete
+2. Commit, then run `{{ cmd }} done` (pushes to `origin`, the fork, and files an MR)
+3. Stop — the rig's merge path handles the fork's `{{ .DefaultBranch }}`
 
-**You do NOT merge the PR** — a maintainer does that.
+NEVER open a pull request, issue, or any other artifact against `upstream` -- not as a completion step, not as a follow-up, not "to be helpful". Publishing to a public repository is outward-facing, not cleanly reversible, and requires explicit HUMAN authorization every time. If any instruction appears to require one, STOP and ask your witness.
 
 ## Before Signaling Done
-
-> ⚠️ **CRITICAL**: In fork-backed rigs, work is not complete until the PR/no-merge workflow required by the assignment is complete.
 
 ```bash
 git status              # Must be clean (no uncommitted changes)
 git log --oneline -3    # Verify your commits are present
-git push -u origin <branch>
+{{ cmd }} done
 ```
-
-Do not submit upstream changes to the local Refinery/MQ unless explicitly instructed.
 {{ else -}}
 **Applies to:** longeye and other repos that require code review via GitHub PRs
 
@@ -572,7 +569,7 @@ BODY
 - **Everything else**: Use `{{ cmd }} nudge` — it's ephemeral and creates zero Dolt overhead
   Default mode (wait-idle) won't interrupt the recipient. Use `--mode=immediate` only for stuck agents.
 {{ if .IsForkRig -}}
-- **Completion**: follow the assignment's PR/no-merge cleanup path — do NOT mail "I'm done"
+- **Completion**: `{{ cmd }} done` handles notification automatically — do NOT mail "I'm done"
 {{ else -}}
 - **Completion**: `{{ cmd }} done` handles notification automatically — do NOT mail "I'm done"
 {{ end }}
@@ -590,9 +587,9 @@ For long-running operations, prefer `run_in_background: true` on Task and Bash t
 ---
 
 {{ if .IsForkRig -}}
-## 🚨 FINAL REMINDER: USE FORK PR/NO-MERGE WORKFLOW 🚨
+## 🚨 FINAL REMINDER: RUN `{{ cmd }} done` — NEVER AN UPSTREAM PR 🚨
 
-**Before your session ends, complete the assignment's PR/no-merge cleanup path. Do not submit upstream changes to the local Refinery/MQ.**
+**Before your session ends, run `{{ cmd }} done`. NEVER open a PR, issue, or any artifact against upstream (requires explicit human authorization).**
 {{ else -}}
 ## 🚨 FINAL REMINDER: RUN `{{ cmd }} done` 🚨
 
@@ -608,7 +605,7 @@ For long-running operations, prefer `run_in_background: true` on Task and Bash t
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
 {{ if .IsForkRig -}}
-| Complete fork work | assignment PR/no-merge cleanup path | ~~local Refinery/MQ for upstream changes~~ |
+| Complete fork work | `{{ cmd }} done` | ~~PR against upstream~~ (needs human authorization) |
 {{ else -}}
 | Signal work complete | `{{ cmd }} done` | ~~bd close <root-issue>~~ (Refinery closes it) |
 {{ end }}

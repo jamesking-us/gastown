@@ -111,12 +111,12 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 		t.Fatalf("RenderRole() error = %v", err)
 	}
 
-	for _, want := range []string{"Fork-backed rig", "GitHub PR/no-merge workflow", "Do NOT submit upstream changes to the local Refinery/MQ"} {
+	for _, want := range []string{"Fork-backed rig", "gt done", "NEVER open a pull request", "STOP and ask your witness"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fork polecat output missing %q:\n%s", want, output)
 		}
 	}
-	for _, forbidden := range []string{"Merge Queue Workflow (gastown, beads repos)", "Refinery merges to main", "Merges your work when complete"} {
+	for _, forbidden := range []string{"Merge Queue Workflow (gastown, beads repos)", "Refinery merges to main", "Merges your work when complete", "Create or update a GitHub PR against upstream", "Create/update a GitHub PR against upstream", "PR/no-merge"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("fork polecat output contains stale MQ guidance %q:\n%s", forbidden, output)
 		}

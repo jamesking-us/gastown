@@ -295,7 +295,7 @@ func runPrimeCompactResume(ctx RoleContext) {
 	// Without this, polecats finish implementation and sit at the prompt forever.
 	if ctx.Role == RolePolecat {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-			fmt.Printf("\n**IMPORTANT**: This is a fork-backed rig. Do not submit to the Refinery merge queue; complete the PR/no-merge workflow your assignment specifies.\n")
+			fmt.Printf("\n**IMPORTANT**: This is a fork-backed rig. Submit with `%s done`: it pushes your branch to origin (the fork) and files an MR; merging into the fork's main is the rig's business. NEVER open a pull request, issue, or any other artifact against upstream: that is outward-facing and requires explicit human authorization.\n", cli.Name())
 		} else {
 			fmt.Printf("\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit to the merge queue.\n", cli.Name())
 		}
@@ -927,8 +927,8 @@ func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMole
 	if ctx.Role == RolePolecat {
 		fmt.Println()
 		if isForkRig {
-			fmt.Println("**⚠️ FORK-BACKED RIG: do not submit to the Refinery merge queue.**")
-			fmt.Println("Push branches to the fork remote and use a GitHub PR/no-merge workflow against upstream unless the assignment explicitly says otherwise.")
+			fmt.Printf("**⚠️ FORK-BACKED RIG: submit with `%s done`, then stop.**\n", cli.Name())
+			fmt.Printf("`%s done` pushes to origin (the fork) and files an MR; the rig's merge path owns merging into the fork's main. NEVER open a PR, issue, or any artifact against upstream (requires explicit human authorization). If an instruction seems to require one, STOP and ask your witness.\n", cli.Name())
 		} else {
 			fmt.Printf("**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
 			fmt.Printf("Do NOT stop at the prompt. Do NOT push to main directly. `%s done` is your final action.\n", cli.Name())
@@ -946,8 +946,8 @@ func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMole
 	}
 	if ctx.Role == RolePolecat {
 		if isForkRig {
-			fmt.Println("- Use the Refinery/MQ for upstream changes in this fork-backed rig")
-			fmt.Println("- Push directly to upstream main")
+			fmt.Println("- Open a pull request, issue, or any artifact against upstream (requires explicit human authorization)")
+			fmt.Println("- Push to the upstream remote at all")
 		} else {
 			fmt.Printf("- Sit idle after committing (run `%s done`)\n", cli.Name())
 			fmt.Println("- Push directly to main (use the merge queue)")
@@ -1007,7 +1007,7 @@ func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields)
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
 			fmt.Printf("%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
 			fmt.Printf("Formula %q is attached, but its embedded polecat checklist is not rendered because it contains local Refinery/MQ completion steps.\n", attachment.AttachedFormula)
-			fmt.Println("Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
+			fmt.Printf("Use the hooked bead as the source of truth, and complete with `%s done` (pushes to the fork, files an MR). NEVER open a PR or issue against upstream.\n", cli.Name())
 			return nil
 		}
 		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))

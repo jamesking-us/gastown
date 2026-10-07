@@ -1157,7 +1157,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						}
 					} else if !isNoMergeTask {
 						if g.ForkBackedRemote("origin") {
-							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", branch, baseRef)
+							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; commit your work and run gt done again, or ask your witness (never open a PR against upstream)", branch, baseRef)
 						}
 						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
 							noteVerifiedPushFailure(bd, cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)

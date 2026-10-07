@@ -284,7 +284,7 @@ func outputPolecatContext(ctx RoleContext) {
 	fmt.Println("- `bd show <issue>` - View your assigned issue")
 	fmt.Println("- `bd close <issue>` - Mark issue complete")
 	if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-		fmt.Println("- Fork rig: push to origin and use PR/no-merge workflow; do not submit upstream changes to MQ")
+		fmt.Println("- Fork rig: submit with `" + cli.Name() + " done` (pushes to origin, the fork, files an MR); NEVER open a PR or issue against upstream")
 	} else {
 		fmt.Println("- `" + cli.Name() + " done` - Signal work ready for merge")
 	}
@@ -316,7 +316,7 @@ func outputCrewContext(ctx RoleContext) {
 	fmt.Println("- `bd show <issue>` - View issue details")
 	fmt.Println("- `bd close <issue>` - Mark issue complete")
 	if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-		fmt.Println("- Fork rig: branch from upstream, push to origin, create PR against upstream")
+		fmt.Println("- Fork rig: submit with `" + cli.Name() + " done` (pushes to origin, the fork); NEVER open a PR against upstream")
 	}
 	fmt.Println()
 	fmt.Println("## Hookable Mail")

@@ -996,6 +996,11 @@ func TestOutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance(t *testing.T) 
 			t.Fatalf("fork autonomous output contains forbidden %q:\n%s", forbidden, output)
 		}
 	}
+	for _, want := range []string{"NEVER open a PR", "STOP and ask your witness"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("fork autonomous output missing %q (gt-h63):\n%s", want, output)
+		}
+	}
 }
 
 func TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder(t *testing.T) {
@@ -1015,10 +1020,13 @@ func TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder(t *test
 	if !strings.Contains(output, "FORK-BACKED RIG OVERRIDE") {
 		t.Fatalf("expected fork override, got:\n%s", output)
 	}
-	for _, forbidden := range []string{"REQUIRED: When all steps complete", "gt done", "submit to the merge queue"} {
+	for _, forbidden := range []string{"REQUIRED: When all steps complete", "PR/no-merge", "PR against upstream main"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("fork molecule workflow kept unsafe formula text %q:\n%s", forbidden, output)
 		}
+	}
+	if !strings.Contains(output, "NEVER open a PR") {
+		t.Fatalf("fork molecule workflow missing upstream-PR prohibition (gt-h63):\n%s", output)
 	}
 }
 
