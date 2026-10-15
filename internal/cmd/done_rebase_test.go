@@ -37,6 +37,7 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 		behind        int
 		preVerified   bool
 		alreadyPushed bool
+		skipBecause   string
 		wantRebased   bool
 		wantSkip      string
 		wantCalls     int
@@ -79,6 +80,14 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 			wantCalls:     0,
 		},
 		{
+			name:        "caller skip reason (published branch / --no-rebase): skip",
+			behind:      3,
+			skipBecause: "polecat/x is already published on origin (rebasing would rewrite pushed commits)",
+			wantRebased: false,
+			wantSkip:    "polecat/x is already published on origin (rebasing would rewrite pushed commits)",
+			wantCalls:   0,
+		},
+		{
 			name:          "pre-verified takes precedence over already-pushed",
 			behind:        3,
 			preVerified:   true,
@@ -92,7 +101,7 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeRebaseGit{}
-			rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", tt.behind, tt.preVerified, tt.alreadyPushed)
+			rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", tt.behind, tt.preVerified, tt.alreadyPushed, tt.skipBecause)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -117,7 +126,7 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 func TestAutoRebaseOnTarget_ConflictAborts(t *testing.T) {
 	fake := &fakeRebaseGit{rebaseErr: errors.New("CONFLICT (content): merge conflict in foo.txt")}
 
-	rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", 1, false, false, "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -176,7 +185,7 @@ func TestAutoRebaseOnTarget_RealRepoSuccess(t *testing.T) {
 	testRunGit(t, repo, "checkout", "feature")
 
 	g := gitpkg.NewGit(repo)
-	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -224,7 +233,7 @@ func TestAutoRebaseOnTarget_RealRepoConflictAborts(t *testing.T) {
 	testRunGit(t, repo, "checkout", "feature")
 
 	g := gitpkg.NewGit(repo)
-	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false, "")
 	if err == nil {
 		t.Fatal("expected conflict error, got nil")
 	}
@@ -250,5 +259,37 @@ func writeRepoFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+type fakeRemoteChecker struct {
+	exists bool
+	err    error
+}
+
+func (f fakeRemoteChecker) RemoteBranchExists(remote, branch string) (bool, error) {
+	return f.exists, f.err
+}
+
+// TestDoneRebaseSkipReason covers gt-4y9: published branches, an unreachable
+// remote and --no-rebase all suppress the auto-rebase; only an unpublished
+// branch may be rebased.
+func TestDoneRebaseSkipReason(t *testing.T) {
+	saved := doneNoRebase
+	defer func() { doneNoRebase = saved }()
+
+	doneNoRebase = false
+	if r := doneRebaseSkipReason(fakeRemoteChecker{exists: false}, "polecat/a"); r != "" {
+		t.Errorf("unpublished branch: got skip %q, want rebase allowed", r)
+	}
+	if r := doneRebaseSkipReason(fakeRemoteChecker{exists: true}, "polecat/a"); !strings.Contains(r, "already published") {
+		t.Errorf("published branch: got %q, want an already-published skip", r)
+	}
+	if r := doneRebaseSkipReason(fakeRemoteChecker{err: errors.New("network down")}, "polecat/a"); !strings.Contains(r, "not rewriting") {
+		t.Errorf("remote check error: got %q, want fail-safe skip", r)
+	}
+	doneNoRebase = true
+	if r := doneRebaseSkipReason(fakeRemoteChecker{exists: false}, "polecat/a"); r != "--no-rebase is set" {
+		t.Errorf("--no-rebase: got %q", r)
 	}
 }
