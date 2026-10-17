@@ -1245,8 +1245,11 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 
 // getSessionPane returns the pane identifier for a session's main pane.
 func getSessionPane(sessionName string) (string, error) {
-	// Get the pane ID for the first pane in the session
-	out, err := tmux.BuildCommand("list-panes", "-t", sessionName, "-F", "#{pane_id}").Output()
+	// Get the pane ID for the first pane in the session. Exact-match the session name: a bare
+	// target is prefix-matched by tmux, so with "cl-crew-compliance" down it would resolve to
+	// "cl-crew-compliance_b" and deliver a start prompt to the wrong seat (cl-3qccp). The trailing
+	// ":" makes list-panes parse it as a session (a bare "=name" is tried as a window too).
+	out, err := tmux.BuildCommand("list-panes", "-t", tmux.ExactSessionTarget(sessionName)+":", "-F", "#{pane_id}").Output()
 	if err != nil {
 		return "", err
 	}

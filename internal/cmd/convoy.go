@@ -1774,7 +1774,7 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	}
 
 	// Check if tmux session exists
-	checkCmd := tmux.BuildCommand("has-session", "-t", sessionName)
+	checkCmd := tmux.BuildCommand("has-session", "-t", tmux.ExactSessionTarget(sessionName))
 	if err := checkCmd.Run(); err != nil {
 		// Session doesn't exist = orphaned molecule or dead worker
 		// This is the key fix: issues with in_progress/hooked status but

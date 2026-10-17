@@ -3156,7 +3156,7 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 // checkTmuxSession checks if a tmux session exists.
 func checkTmuxSession(sessionName string) bool {
 	// Use has-session command which returns 0 if session exists
-	cmd := tmux.BuildCommand("has-session", "-t", sessionName)
+	cmd := tmux.BuildCommand("has-session", "-t", tmux.ExactSessionTarget(sessionName))
 	return cmd.Run() == nil
 }
 

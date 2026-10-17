@@ -1095,6 +1095,17 @@ func (t *Tmux) IsAvailable() bool {
 	return cmd.Run() == nil
 }
 
+// ExactSessionTarget returns a tmux target that matches the session name exactly ("=name").
+// Bare session targets are prefix-matched by tmux ("cl-crew-compliance" resolves to
+// "cl-crew-compliance_b" when the former is absent; cl-3qccp). psmux on Windows does not
+// support "=", so the bare name is used there.
+func ExactSessionTarget(name string) string {
+	if runtime.GOOS == "windows" || strings.HasPrefix(name, "=") || strings.HasPrefix(name, "%") {
+		return name
+	}
+	return "=" + name
+}
+
 // HasSession checks if a session exists (exact match).
 // Uses "=" prefix for exact matching, preventing prefix matches
 // (e.g., "gt-deacon-boot" won't match when checking for "gt-deacon").
@@ -2432,7 +2443,7 @@ func (t *Tmux) GetPaneID(session string) (string, error) {
 // Targets pane 0 explicitly to avoid returning the active pane's
 // working directory in multi-pane sessions.
 func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
-	out, err := t.run("display-message", "-t", session+":0.0", "-p", "#{pane_current_path}")
+	out, err := t.run("display-message", "-t", ExactSessionTarget(session)+":0.0", "-p", "#{pane_current_path}")
 	if err != nil {
 		return "", err
 	}
